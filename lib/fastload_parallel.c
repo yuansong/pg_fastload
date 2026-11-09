@@ -82,7 +82,6 @@ fl_tick(double *acc, instr_time *prev)
 #define FL_TICK(acc, prev)	((void) 0)
 #endif
 
-static int	fastload_default_workers(void);
 static void fastload_fill_params(FastloadParams *p, Reader *rd, Writer *wt,
 								 int nworkers);
 static void fastload_terminate_workers(BackgroundWorkerHandle **handles,
@@ -101,7 +100,8 @@ static void fastload_wait_reader_ready(FastloadShared *hdr,
  * Deliberately conservative: the parallel path does not implement the
  * per-row error absorption (PARSE_BADFILE / PARSE_ERRORS), encoding
  * conversion, CHECK_CONSTRAINTS / NOT NULL checking, FILTER,
- * FORCE_NOT_NULL, dropped columns, or STDIN input.  Those all take the
+ * FORCE_NOT_NULL, dropped columns, STDIN input, or MULTI_PROCESS
+ * (WRITER=PARALLEL, i.e. the upstream parallel writer).  Those all take the
  * serial path.
  *
  * NOTE on tchecker: CreateTupleChecker() is called unconditionally by every
@@ -141,7 +141,7 @@ FastloadParallelSupported(Reader *rd, Writer *wt)
 	 */
 	nworkers = rd->parallel_workers;
 	if (nworkers <= 0)
-		nworkers = fastload_default_workers();
+		nworkers = FastloadDefaultWorkers();
 	if (nworkers <= 1)
 	{
 		LoggerLog(INFO, "pg_fastload: PARALLEL disabled (workers=1, "
@@ -153,6 +153,22 @@ FastloadParallelSupported(Reader *rd, Writer *wt)
 	{
 		LoggerLog(INFO, "pg_fastload: PARALLEL disabled (FILTER / "
 				  "FORCE_NOT_NULL requires the single-process parser)\n");
+		return false;
+	}
+
+	/*
+	 * MULTI_PROCESS=YES (WRITER=PARALLEL) wraps the writer in the upstream
+	 * parallel writer: a second backend that inserts over the pgut IPC queue
+	 * in its own transaction.  That mechanism already moves stage (4) out of
+	 * this backend, so stacking the parallel reader on top buys no extra
+	 * throughput and only adds a second process fan-out plus a second
+	 * transaction boundary.  Keep that combination on the single-process
+	 * reader, which is exactly the upstream behaviour.
+	 */
+	if (wt->multi_process)
+	{
+		LoggerLog(INFO, "pg_fastload: PARALLEL disabled (MULTI_PROCESS / "
+				  "WRITER=PARALLEL is not combined with the parallel reader)\n");
 		return false;
 	}
 
@@ -227,8 +243,8 @@ FastloadParallelSupported(Reader *rd, Writer *wt)
  * Default worker count = online CPUs - 1, because the writer still occupies
  * one process.  Clamped to [1, FASTLOAD_MAX_WORKERS].
  */
-static int
-fastload_default_workers(void)
+int
+FastloadDefaultWorkers(void)
 {
 	long	n = sysconf(_SC_NPROCESSORS_ONLN);
 	int		w;
@@ -458,7 +474,7 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 #endif
 
 	if (nworkers <= 0)
-		nworkers = fastload_default_workers();
+		nworkers = FastloadDefaultWorkers();
 	if (nworkers > FASTLOAD_MAX_WORKERS)
 		nworkers = FASTLOAD_MAX_WORKERS;
 
@@ -580,7 +596,6 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 			shm_mq_result		r;
 
 			wid.worker_id = i;
-			wid.nworkers = nworkers;
 			memcpy(worker.bgw_extra, &wid, sizeof(wid));
 
 			if (!RegisterDynamicBackgroundWorker(&worker, &handles[i + 1]))
@@ -695,9 +710,11 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 				else if (r == SHM_MQ_DETACHED)
 				{
 					int		st;
+					char	errbuf[256];
 
 					SpinLockAcquire(&hdr->mutex);
 					st = hdr->worker_state[i];
+					memcpy(errbuf, hdr->worker_error[i], sizeof(errbuf));
 					SpinLockRelease(&hdr->mutex);
 
 					done[i] = true;
@@ -709,7 +726,7 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 								(errcode(ERRCODE_INTERNAL_ERROR),
 								 errmsg("pg_fastload worker %d terminated "
 										"unexpectedly (state=%d): %s",
-										i, st, hdr->worker_error[i])));
+										i, st, errbuf)));
 				}
 				/* SHM_MQ_WOULD_BLOCK: keep polling this worker later. */
 			}

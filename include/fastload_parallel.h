@@ -122,7 +122,6 @@ typedef struct FastloadShared
 {
 	slock_t		mutex;
 	int			nworkers;
-	int			workers_ready;
 	int			reader_state;
 	bool		reader_failed;
 	char		reader_error[256];
@@ -143,12 +142,21 @@ typedef struct FastloadShared
 } FastloadShared;
 
 /*
- * Passed in BackgroundWorker.bgw_extra (128 bytes available).
+ * Passed in BackgroundWorker.bgw_extra (128 bytes available).  Only the
+ * worker index is needed worker-side; the worker count comes from the DSM
+ * parameter block.
  */
 typedef struct FastloadWorkerId
 {
 	int			worker_id;
-	int			nworkers;
 } FastloadWorkerId;
+
+/*
+ * Effective worker count when PARALLEL_WORKERS is not given: online CPUs
+ * minus one (the leader keeps inserting serially), clamped to
+ * [1, FASTLOAD_MAX_WORKERS].  Single implementation for ReaderInit() and
+ * the leader orchestration.
+ */
+extern int	FastloadDefaultWorkers(void);
 
 #endif   /* FASTLOAD_PARALLEL_H_INCLUDED */

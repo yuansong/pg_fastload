@@ -229,7 +229,6 @@ pg_fastload_worker_main(Datum main_arg)
 	 */
 	SpinLockAcquire(&hdr->mutex);
 	hdr->worker_state[ctx.worker_id] = FL_WORKER_RUNNING;
-	hdr->workers_ready++;
 	SpinLockRelease(&hdr->mutex);
 	registrant = BackendPidGetProc(MyBgworkerEntry->bgw_notify_pid);
 	if (registrant != NULL)
@@ -782,10 +781,10 @@ fl_reader_scan(FastloadParams *p, FastloadRouter *router)
 				fl_append_run(&rec, &rec_used, &rec_cap,
 							  pend + run, i - run);
 
-			/* SKIP / LIMIT window, then route to the chunk owner's queue */
-			if (fl_route_record(p, router, rec_no, rec, rec_used))
+				/* SKIP / LIMIT window, then route to the chunk owner */
+				if (fl_route_record(p, router, rec_no, rec, rec_used))
 				{
-					/* whole window delivered: stop early, like plan B */
+					/* whole window delivered: stop the scan early */
 					stopped = true;
 					break;
 				}
@@ -957,8 +956,10 @@ pg_fastload_reader_main(Datum main_arg)
 	FastloadParams	   *p;
 	FastloadRouter		router;
 	PGPROC			   *registrant;
+#ifdef ENABLE_FASTLOAD_PROFILE
 	instr_time			t_start;
 	instr_time			t_end;
+#endif
 	int					i;
 
 	pqsignal(SIGTERM, die);
@@ -1003,7 +1004,9 @@ pg_fastload_reader_main(Datum main_arg)
 	if (registrant != NULL)
 		SetLatch(&registrant->procLatch);
 
+#ifdef ENABLE_FASTLOAD_PROFILE
 	INSTR_TIME_SET_CURRENT(t_start);
+#endif
 
 	PG_TRY();
 	{
@@ -1012,8 +1015,10 @@ pg_fastload_reader_main(Datum main_arg)
 		else
 			fl_reader_scan(p, &router);
 
+#ifdef ENABLE_FASTLOAD_PROFILE
 		INSTR_TIME_SET_CURRENT(t_end);
 		INSTR_TIME_SUBTRACT(t_end, t_start);
+#endif
 
 		/*
 		 * Mark DONE before detaching: the workers read reader_state when
@@ -1022,7 +1027,9 @@ pg_fastload_reader_main(Datum main_arg)
 		 */
 		SpinLockAcquire(&hdr->mutex);
 		hdr->reader_state = FL_WORKER_DONE;
+#ifdef ENABLE_FASTLOAD_PROFILE
 		hdr->reader_scan = INSTR_TIME_GET_DOUBLE(t_end);
+#endif
 		SpinLockRelease(&hdr->mutex);
 
 		/* Release the workers: their receive now reports clean EOF. */
