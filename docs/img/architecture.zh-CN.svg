@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="700" viewBox="0 0 1240 700" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, Source Han Sans SC, sans-serif">
+  <defs>
+    <marker id="fw" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0.6 L 10 5 L 0 9.4 z" fill="#475569"/>
+    </marker>
+    <marker id="rv" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0.6 L 10 5 L 0 9.4 z" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1240" height="700" fill="#ffffff"/>
+
+  <!-- ============ 标题 ============ -->
+  <text x="28" y="46" font-size="23" font-weight="700" fill="#0f172a">pg_fastload 整体架构</text>
+  <text x="28" y="72" font-size="13" fill="#475569">单读多解：1 个 reader 进程把文件顺序读一遍，N 个解析进程并行成型元组，leader 进程串行写入。</text>
+
+  <!-- ============ 阶段徽标 ============ -->
+  <g font-size="11" font-weight="600">
+    <circle cx="196" cy="106" r="10" fill="#4f46e5"/>
+    <text x="196" y="110" font-size="11" fill="#ffffff" text-anchor="middle">1</text>
+    <text x="212" y="110" fill="#312e81">读入</text>
+
+    <circle cx="655" cy="106" r="10" fill="#2563eb"/>
+    <text x="655" y="110" font-size="11" fill="#ffffff" text-anchor="middle">2</text>
+    <text x="671" y="110" fill="#1e3a8a">解析记录</text>
+    <circle cx="737" cy="106" r="10" fill="#2563eb"/>
+    <text x="737" y="110" font-size="11" fill="#ffffff" text-anchor="middle">3</text>
+    <text x="753" y="110" fill="#1e3a8a">形成元组</text>
+
+    <circle cx="1089" cy="106" r="10" fill="#d97706"/>
+    <text x="1089" y="110" font-size="11" fill="#ffffff" text-anchor="middle">4</text>
+    <text x="1105" y="110" fill="#78350f">写入</text>
+  </g>
+
+  <!-- ============ 输入文件 ============ -->
+  <rect x="28" y="156" width="150" height="150" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="44" y="190" font-size="13" font-weight="700" fill="#0f172a">输入文件</text>
+  <text x="44" y="214" font-size="10.5" fill="#334155">CSV · BINARY · FIXED</text>
+  <text x="44" y="248" font-size="10.5" fill="#475569">由 reader 进程打开</text>
+  <text x="44" y="266" font-size="10.5" fill="#475569">整个装载只读 1 遍</text>
+  <text x="44" y="290" font-size="10" fill="#64748b">不做 N 次重复读</text>
+
+  <!-- ============ reader 进程 ============ -->
+  <rect x="214" y="126" width="200" height="200" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.6"/>
+  <text x="228" y="156" font-size="12.5" font-weight="700" fill="#1e1b4b">reader 后台工作进程</text>
+  <rect x="226" y="166" width="158" height="18" rx="9" fill="#fee2e2" stroke="#ef4444" stroke-width="1"/>
+  <text x="232" y="179" font-size="9.5" font-weight="700" fill="#b91c1c">独立 OS 进程，不是线程</text>
+
+  <g font-size="10.8" fill="#1e293b">
+    <text x="228" y="208">• 顺序扫描，1 MiB / 次读取</text>
+    <text x="228" y="230">• 记录边界状态机（引号感知）</text>
+    <text x="228" y="252">• SKIP / LIMIT 全局窗口裁剪</text>
+    <text x="228" y="274">• 按 512 KiB 分块轮转路由</text>
+  </g>
+  <line x1="228" y1="286" x2="400" y2="286" stroke="#c7d2fe" stroke-width="1"/>
+  <text x="228" y="304" font-size="9.8" fill="#4338ca">不建数据库连接</text>
+  <text x="228" y="318" font-size="9.8" fill="#4338ca">（仅持共享内存访问权）</text>
+
+  <!-- ============ 输入队列 ============ -->
+  <rect x="450" y="146" width="136" height="170" rx="10" fill="#ecfdf5" stroke="#14b8a6" stroke-width="1.4"/>
+  <text x="462" y="176" font-size="12" font-weight="700" fill="#134e4a">输入队列 × N</text>
+  <text x="462" y="202" font-size="10.3" fill="#0f766e">shm_mq</text>
+  <text x="462" y="222" font-size="10.3" fill="#0f766e">每条 8 MiB</text>
+  <text x="462" y="242" font-size="10.3" fill="#0f766e">key 66 … 65+N</text>
+  <line x1="462" y1="258" x2="574" y2="258" stroke="#99f6e4" stroke-width="1"/>
+  <text x="462" y="278" font-size="10" fill="#115e59">reader → worker</text>
+  <text x="462" y="298" font-size="9.5" fill="#64748b">每 worker 独占一条</text>
+
+  <!-- ============ 解析进程 ============ -->
+  <rect x="622" y="126" width="200" height="200" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.6"/>
+  <text x="636" y="156" font-size="12.5" font-weight="700" fill="#1e3a8a">解析进程 × N</text>
+  <rect x="634" y="166" width="122" height="18" rx="9" fill="#dbeafe" stroke="#60a5fa" stroke-width="1"/>
+  <text x="640" y="179" font-size="9.5" font-weight="700" fill="#1d4ed8">worker #0 … #N-1</text>
+
+  <g font-size="10.8" fill="#1e293b">
+    <text x="636" y="208">• 从输入队列批量取记录</text>
+    <text x="636" y="230">• 字段切分（CSV / 定长）</text>
+    <text x="636" y="252">• 列输入函数 → Datum</text>
+    <text x="636" y="274">• heap_form_tuple()</text>
+  </g>
+  <line x1="636" y1="286" x2="808" y2="286" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="636" y="304" font-size="9.8" fill="#1e40af">N = PARALLEL_WORKERS</text>
+  <text x="636" y="318" font-size="9.8" fill="#1e40af">默认 CPU 数 − 1，上限 64</text>
+
+  <!-- ============ 回传队列 ============ -->
+  <rect x="858" y="146" width="136" height="170" rx="10" fill="#ecfdf5" stroke="#14b8a6" stroke-width="1.4"/>
+  <text x="870" y="176" font-size="12" font-weight="700" fill="#134e4a">回传队列 × N</text>
+  <text x="870" y="202" font-size="10.3" fill="#0f766e">shm_mq</text>
+  <text x="870" y="222" font-size="10.3" fill="#0f766e">每条 2 MiB</text>
+  <text x="870" y="242" font-size="10.3" fill="#0f766e">key 2 … 1+N</text>
+  <line x1="870" y1="258" x2="982" y2="258" stroke="#99f6e4" stroke-width="1"/>
+  <text x="870" y="278" font-size="10" fill="#115e59">worker → leader</text>
+  <text x="870" y="298" font-size="9.5" fill="#64748b">一条消息 = 一个元组</text>
+
+  <!-- ============ leader ============ -->
+  <rect x="1030" y="126" width="180" height="200" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.6"/>
+  <text x="1044" y="156" font-size="12.5" font-weight="700" fill="#78350f">leader（主 backend）</text>
+  <text x="1044" y="174" font-size="9.8" fill="#92400e">调用 pg_fastload() 的会话进程</text>
+
+  <g font-size="10.4" fill="#1e293b">
+    <text x="1044" y="202">• 判定可用性、建 DSM</text>
+    <text x="1044" y="224">• 注册 1 + N 个后台进程</text>
+    <text x="1044" y="246">• 接收并复制元组</text>
+    <text x="1044" y="268">• 串行 WriterInsert()</text>
+    <text x="1044" y="290">• WriterClose、收尾清理</text>
+  </g>
+  <rect x="1042" y="300" width="156" height="20" rx="6" fill="#dcfce7" stroke="#22c55e" stroke-width="1"/>
+  <text x="1120" y="314" font-size="9.6" font-weight="700" fill="#14532d" text-anchor="middle">堆表 + 索引（spool → btree）</text>
+
+  <!-- ============ 数据流箭头 ============ -->
+  <line x1="178" y1="226" x2="212" y2="226" stroke="#475569" stroke-width="2.2" marker-end="url(#fw)"/>
+  <line x1="414" y1="226" x2="448" y2="226" stroke="#475569" stroke-width="2.2" marker-end="url(#fw)"/>
+  <line x1="586" y1="226" x2="620" y2="226" stroke="#475569" stroke-width="2.2" marker-end="url(#fw)"/>
+  <line x1="822" y1="226" x2="856" y2="226" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#rv)"/>
+  <line x1="994" y1="226" x2="1028" y2="226" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#rv)"/>
+
+  <!-- ============ DSM 括线 ============ -->
+  <path d="M 518 316 L 518 348 L 926 348 L 926 316" fill="none" stroke="#0d9488" stroke-width="1.6" stroke-dasharray="5 4"/>
+  <text x="722" y="370" font-size="10.3" fill="#0f766e" text-anchor="middle">两段队列同处一个 DSM 共享段：key 0 控制块 · key 1 参数块 · key 2… 回传 · key 66… 输入</text>
+
+  <!-- ============ 左下：进程 vs 线程 ============ -->
+  <rect x="28" y="388" width="580" height="196" rx="10" fill="#fff7ed" stroke="#fdba74" stroke-width="1.4"/>
+  <text x="46" y="416" font-size="12.8" font-weight="700" fill="#7c2d12">为什么 reader 是进程，不是线程</text>
+  <g font-size="10.9" fill="#431407">
+    <text x="46" y="446">PostgreSQL 是 fork 模型：一个 backend 进程内不能再起线程。</text>
+    <text x="46" y="468">内存上下文、GUC、syscache、快照都以进程为隔离单位，全部不是线程安全的。</text>
+    <text x="46" y="496">所以并行子系统直接使用原生 bgworker：reader 与每个 worker 都是独立 OS 进程，</text>
+    <text x="46" y="518">各自持有自己的 PGPROC、内存上下文和事务状态。</text>
+    <text x="46" y="546">进程之间只通过 DSM 交换字节，不共享任意内存 —— 无需自研锁，也没有线程间竞态。</text>
+  </g>
+  <text x="46" y="572" font-size="10" fill="#9a3412">对照：pg_bulkload 的 WRITER=PARALLEL 另开一个 backend 并经 SysV IPC 队列通信。</text>
+
+  <!-- ============ 右下：分工与降级 ============ -->
+  <rect x="628" y="388" width="584" height="196" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="646" y="416" font-size="12.8" font-weight="700" fill="#0f172a">分工边界与降级</text>
+  <g font-size="10.9" fill="#334155">
+    <text x="646" y="446">①②③ 拆分到 N 个进程并行；④ 留在 leader 内串行 —— WriterInsert() 会原位改写</text>
+    <text x="646" y="468">元组头（infomask / xmin / t_self / t_ctid），多进程写同一堆表只会换来锁与 WAL 竞争。</text>
+    <text x="646" y="496">并行按次开启：只有 PARALLEL=ON 才走多进程；PARALLEL=OFF 与原版行为逐位一致。</text>
+    <text x="646" y="524">无法保证语义等价的组合（FILTER、FORCE_NOT_NULL、转码、约束检查、PARSE_ERRORS、</text>
+    <text x="646" y="546">STDIN、dropped 列、WRITER=PARALLEL）打印一条 INFO 后回退单进程路径，不静默改语义。</text>
+  </g>
+  <text x="646" y="572" font-size="10" fill="#64748b">EOF 判定：reader 先置 DONE 再 detach；worker 见 DETACHED 后校验状态，区分正常收尾与崩溃。</text>
+
+  <!-- ============ 底部前提 ============ -->
+  <rect x="28" y="604" width="1184" height="74" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <text x="46" y="628" font-size="11.5" font-weight="700" fill="#0f172a">运行前提</text>
+  <text x="46" y="650" font-size="10.8" fill="#334155">max_worker_processes ≥ PARALLEL_WORKERS + 1（N 个解析进程 + 1 个 reader 进程）</text>
+  <text x="46" y="668" font-size="10" fill="#64748b">无需修改 shared_preload_libraries</text>
+
+  <text x="660" y="628" font-size="11.5" font-weight="700" fill="#0f172a">资源占用</text>
+  <text x="660" y="650" font-size="10.8" fill="#334155">DSM ≈ 头部 + 参数块 + N ×（8 MiB 输入 + 2 MiB 回传），15 worker 约 150 MiB</text>
+  <text x="660" y="668" font-size="10" fill="#64748b">单条记录上限 256 MiB；文件 I/O 恒为 1×</text>
+</svg>

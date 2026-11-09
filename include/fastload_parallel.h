@@ -34,7 +34,7 @@
 #define FASTLOAD_QUEUE_SIZE			(2 * 1024 * 1024)
 
 /*
- * Per-worker reader->worker input queue size (plan C).  The single reader
+ * Per-worker reader->worker input queue size.  The single reader
  * interleaves chunks across the queues, so while it is blocked on one full
  * queue every OTHER queue is temporarily starved; each queue's buffer must
  * be deep enough to bridge those windows.  Measured at w=2, 1 MiB queues
@@ -114,8 +114,8 @@ typedef enum FastloadWorkerState
 /*
  * Control block at shm_toc key 0.  worker_state[] / worker_error[] let the
  * leader distinguish a clean EOF from a crashed worker.  reader_state /
- * reader_failed / reader_error do the same for the single reader process
- * (plan C); reader_scan is the reader's own published total runtime for
+ * reader_failed / reader_error do the same for the single reader process;
+ * reader_scan is the reader's own published total runtime for
  * the <PARALLEL> profile group.
  */
 typedef struct FastloadShared

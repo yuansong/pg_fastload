@@ -8,7 +8,7 @@
  *   Parallel CSV loader extensions
  *       Copyright (c) 2026, yuanyuansong
  *
- *   Plan C (single-reader): ONE reader background worker opens the input
+ *   Single-reader design: ONE reader background worker opens the input
  *   file and walks it from byte 0 exactly once.  For TYPE=CSV it uses the
  *   quote-aware record-boundary state machine (CRLF, lone CR, lone LF,
  *   doubled quotes and newlines inside quoted fields are all handled).
@@ -128,7 +128,7 @@ typedef struct FastloadWorkerCtx
 {
 	FastloadParams	   *p;
 	FastloadShared	   *hdr;
-	shm_mq_handle	   *in_mqh;	/* reader->worker input queue (plan C) */
+	shm_mq_handle	   *in_mqh;	/* reader->worker input queue */
 	int					worker_id;
 	shm_mq_handle	   *mqh;
 
@@ -541,7 +541,7 @@ fl_consume_input(FastloadWorkerCtx *ctx)
 }
 
 /* ------------------------------------------------------------------------
- * Reader process (plan C): single-pass record splitter and router
+ * Reader process: single-pass record splitter and router
  *
  * Walks the whole input file ONCE with the same quote-aware boundary state
  * machine the plan-B workers used, applies the SKIP/LIMIT window (global
