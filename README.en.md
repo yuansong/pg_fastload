@@ -331,6 +331,7 @@ Downgrading is a **safety net, not an error**: `PARALLEL=ON` is always safe to e
 |---|---|---|
 | User manual (install / all keywords / usage / FAQ) | [docs/USER_MANUAL.md](docs/USER_MANUAL.md) | [docs/USER_MANUAL.en.md](docs/USER_MANUAL.en.md) |
 | Architecture (components, data flow, IPC, downgrade design) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | [docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md) |
+| Portability (PG 15–19 differences and verification) | [docs/PORTING.md](docs/PORTING.md) | [docs/PORTING.en.md](docs/PORTING.en.md) |
 | Changes relative to pg_bulkload | [docs/CHANGES.md](docs/CHANGES.md) | — |
 | Benchmarks | [docs/BENCHMARK.md](docs/BENCHMARK.md) | — |
 | Verification report | [docs/VERIFICATION.md](docs/VERIFICATION.md) | — |
@@ -340,8 +341,11 @@ Downgrading is a **safety net, not an error**: `PARALLEL=ON` is always safe to e
 
 ## 8. Compatibility and license
 
-- **Verified on**: PostgreSQL 18.6 (`REL_18_STABLE`), x86_64 Linux, 16 vCPU. The sources keep
-  `#if PG_VERSION_NUM` branches for older majors, but this release is only fully verified on 18.x.
+- **Verified on**: PostgreSQL 15.19 / 16.15 / 17.11 / 18.6 / 19rc1, x86_64 Linux, 16 vCPU. All five
+  majors were run through the same functional suite (`util/fl_ver_test.sh`): serial vs parallel CSV,
+  serial vs parallel fixed length, the `FILTER` downgrade, parse-error handling and the CLI client.
+  Every difference and its fix is listed in [docs/PORTING.en.md](docs/PORTING.en.md); each major has
+  a matching `REL_1x_STABLE` branch.
 - **Attribution**: `COPYRIGHT` is preserved byte for byte and every inherited source file keeps its
   `Copyright (c) ... NTT, Inc.` header. The parallel subsystem is
   Copyright (c) 2026, yuanyuansong, released under the same BSD 3-Clause terms.

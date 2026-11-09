@@ -312,6 +312,7 @@ SELECT count, duration FROM pgfastload.pg_fastload(ARRAY[...]);
 |---|---|---|
 | 用户手册（安装 / 关键字全表 / 用法 / FAQ） | [docs/USER_MANUAL.md](docs/USER_MANUAL.md) | [docs/USER_MANUAL.en.md](docs/USER_MANUAL.en.md) |
 | 架构（组件职责、数据流、IPC 协议、降级设计） | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | [docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md) |
+| 多版本适配（PG 15–19 差异与验收结果） | [docs/PORTING.md](docs/PORTING.md) | [docs/PORTING.en.md](docs/PORTING.en.md) |
 | 相对 pg_bulkload 的修改点 | [docs/CHANGES.md](docs/CHANGES.md) | — |
 | 性能基准 | [docs/BENCHMARK.md](docs/BENCHMARK.md) | — |
 | 验证报告（用例、正确性、内存、合规） | [docs/VERIFICATION.md](docs/VERIFICATION.md) | — |
@@ -321,8 +322,10 @@ SELECT count, duration FROM pgfastload.pg_fastload(ARRAY[...]);
 
 ## 8. 兼容性与许可
 
-- **验证环境**：PostgreSQL 18.6（`REL_18_STABLE`），x86_64 Linux，16 vCPU。
-  源码保留了对早期主版本的 `#if PG_VERSION_NUM` 兼容分支，但本版本只在 18.x 上做了完整验证。
+- **验证环境**：PostgreSQL 15.19 / 16.15 / 17.11 / 18.6 / 19rc1，x86_64 Linux，16 vCPU。
+  五个主版本都用 `util/fl_ver_test.sh` 跑过同一套功能验收（CSV 串行/并行、定长串行/并行、
+  `FILTER` 降级、解析错误处理、命令行客户端），全部通过；版本差异与逐条适配说明见
+  [docs/PORTING.md](docs/PORTING.md)。每一代主版本有对应的 `REL_1x_STABLE` 分支。
 - **上游署名**：`COPYRIGHT` 原文逐字节保留，每个继承源文件头部保留 `Copyright (c) ... NTT, Inc.`；
   并行子系统的版权归 yuanyuansong (2026)，以相同 BSD 3-Clause 条款发布。
 - **非背书**：本项目未获 NTT, Inc. 或 pg_bulkload 贡献者背书或赞助；不使用其商标做推广。

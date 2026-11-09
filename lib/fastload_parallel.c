@@ -21,11 +21,16 @@
 #include <unistd.h>
 
 #include "access/htup_details.h"
-#include "commands/dbcommands.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/lsyscache.h"	/* get_database_name() */
+#else
+#include "commands/dbcommands.h"	/* get_database_name() */
+#endif
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/dsm.h"
 #include "storage/ipc.h"
+#include "storage/proc.h"		/* MyProc */
 #include "storage/shm_mq.h"
 #include "storage/shm_toc.h"
 #include "storage/spin.h"

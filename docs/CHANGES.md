@@ -280,5 +280,34 @@ fl_w8 1.76 s、fl_w15 1.74 s、fl_auto 1.76 s，与上一轮差异在 ±5% 运�
 
 ---
 
+## 16. 多版本适配 PG 15 / 16 / 17 / 19（2026-11-10）
+
+目标：同一份源码在 15.19 / 16.15 / 17.11 / 18.6 / 19rc1 上编译并通过同一套功能验收。
+版本差异全部用 `#if PG_VERSION_NUM` 收敛，不做业务代码分叉。
+
+| 文件 | 改动 |
+|---|---|
+| `lib/fastload_worker.c` | `populate_compact_attribute()` 仅 ≥18 调用（18 新增，早期版本按需计算） |
+| `lib/fastload_parallel.c` | `get_database_name()` 头文件按版本选择（19 移到 `utils/lsyscache.h`）；补 `storage/proc.h`（`MyProc`） |
+| `lib/writer_parallel.c` | 同上，`get_database_name()` 头文件按版本选择 |
+| `lib/pgut/pgut-be.h` | 新增 `FastloadBackendNumber` / `FastloadInvalidBackend`：≥17 用 `MyProcNumber` / `INVALID_PROC_NUMBER`（19 移除了 `MyBackendId`），更早用 `MyBackendId` / `InvalidBackendId` |
+| `lib/pg_btree.c` | 临时关系定位改用上述宏（同时修正 17 分支误用 `MyBackendType` / `InvalidCommandId` 的问题）；索引构建分支接入 `nbtsort-19.c` |
+| `lib/writer_direct.c` | 同上宏；≥19 `PageAddItem()` 直接传 `const void *`（`Item` typedef 已删除）、`PageSetChecksumInplace()` → `PageSetChecksum()` |
+| `lib/pg_strutil.c` | ≥19 `FuncnameGetCandidates()` 新增 `int *fgc_flags` 出参，且**无条件解引用**，改传一次性 `int[1]` 复合字面量（传 `NULL` 实测段错误） |
+| `lib/nbtree/nbtsort-19.c` | 新增：PG19 的 `nbtsort.c`（`BTSpool` 已私有化、`palloc*_object` 等），与 18 版差 59 行 |
+| `bin/pgut/pgut-list.h` | ≥19 补 `typedef uint64_t Datum;`（`Datum` 从 `c.h` 移入 `postgres.h`，前端不可用） |
+| `bin/recovery.c` | ≥19 `pd_lsn` 改用 `PageXLogRecPtrGet()`（`PageXLogRecPtr` 变单 64 位值） |
+| `util/fl_ver_test.sh` | 新增：单主版本功能验收脚本（9 类断言），`PG_PREFIX` / `SRC` / `ROWS` 可覆盖 |
+| `docs/PORTING.md` / `.en.md` | 新增：支持矩阵、10 条内核差异与处理、验收方法与结果 |
+
+验收（四个版本各跑一遍，全部 PASS）：CSV 串行/并行 5 配置摘要一致、定长 3 配置摘要一致、
+`FILTER` 降级内容一致且 `LOGFILE` 有 `PARALLEL disabled (FILTER` 提示、解析错误默认停在第 1 条
+坏记录而 `PARSE_ERRORS=2` 保留 2 条好记录、CLI 退出码 0 且装载 200,000 行、服务端日志无 PANIC。
+
+顺带修正：用户手册 `PARSE_ERRORS` 的描述原为"超过则装载失败"，实际是**超过即停止读取并正常返回**
+（已装载行保留，日志给 `Maximum parse error count exceeded`），中英文两版已改。
+
+---
+
 *未采纳方案汇总见 [OPTIMIZATION.md](OPTIMIZATION.md#八未采纳方案汇总)；性能数据见
 [BENCHMARK.md](BENCHMARK.md)；验证结论见 [VERIFICATION.md](VERIFICATION.md)。*

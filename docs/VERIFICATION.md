@@ -177,11 +177,48 @@ bgworker 真启动（日志有 `PARALLEL=ON, TYPE=CSV, workers=N` 且无 `PARALL
 
 ---
 
-## 9. 结论
+## 9. 多版本适配验证（2026-11-10）
+
+对 PostgreSQL **15.19 / 16.15 / 17.11 / 19rc1** 分别做"独立集群 + 独立构建"的验收，
+脚本为 [`util/fl_ver_test.sh`](../util/fl_ver_test.sh)（18.6 的验证见 §3–§5）。
+
+| 环境 | 值 |
+|---|---|
+| 构建 | 源码树内 `make clean && make && make install`，`PG_CONFIG` 指向目标版本前缀 |
+| 集群 | 每版本临时 `initdb`，端口 `54<major>`，`max_worker_processes=32`，`fsync=off` |
+| 数据 | 200,000 行 CSV（含 `"q,%d"` 引号字段）+ 等量 100 字节定长记录 |
+| 计时 | 不做性能比较，只看**内容与行为**是否正确 |
+
+| 用例 | 断言 | 15.19 | 16.15 | 17.11 | 19rc1 |
+|---|---|---|---|---|---|
+| CSV `PARALLEL=OFF` vs `w2/w4/w8/auto` | 行数 200,000 且摘要一致 | PASS | PASS | PASS | PASS |
+| 定长 `TYPE=BINARY` `OFF` vs `w4/w8` | 行数 10.7M 级一致、摘要一致 | PASS | PASS | PASS | PASS |
+| `FILTER` 降级 | 串行与 `PARALLEL=ON` 摘要一致 + `LOGFILE` 出现 `PARALLEL disabled (FILTER` | PASS | PASS | PASS | PASS |
+| 解析容错 | 默认停在第 1 条坏记录（保留已装载行）；`PARSE_ERRORS=2` 保留 2 条好记录 | PASS | PASS | PASS | PASS |
+| CLI 客户端 | `pg_fastload -h -p -U -d x.ctl` 退出码 0、装载 200,000 行 | PASS | PASS | PASS | PASS |
+| 服务端日志 | 无 `PANIC` / 段错误 | PASS | PASS | PASS | PASS |
+
+过程中发现并修复的两个真实缺陷：
+
+1. **PG19 `FuncnameGetCandidates()` 出参**：19 新增 `int *fgc_flags` 且**无条件解引用**，
+   原实现传 `NULL`，导致任何 `FILTER` / `TYPE=FUNCTION` 装载直接段错误（后端进程被信号 11 终止，
+   集群进入恢复）。改为传一次性 `int[1]` 复合字面量后通过。
+2. **`MyBackendId` 移除**：PG19 删除了整个 `BackendId` API，`pg_fastload.so` 装载时报
+   `undefined symbol: MyBackendId`。改为 `FastloadBackendNumber` 宏（≥17 用 `MyProcNumber`）。
+
+另外核实并修正了一处文档错误：`PARSE_ERRORS` 超限的实际行为是**停止读取并正常返回**
+（保留已装载行），不是手册原来写的"装载失败"。
+
+逐条内核差异与处理方式见 [PORTING.md](PORTING.md)。
+
+---
+
+## 10. 结论
 
 当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8）、构建（release + debug
 双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、定长 1.82×）、内存生命周期（全 palloc、
-无 malloc 族符号）与版权合规（保留原版权 + 明确署名与非背书）五个维度达到交付标准。
+无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）与版权合规（保留原版权 + 明确署名
+与非背书）六个维度达到交付标准。
 
 残留风险均可归因于环境限制或明确的设计取舍，已在 §8 与 [OPTIMIZATION.md](OPTIMIZATION.md)
 中写明，并给出相应的使用建议（例如冷缓存场景的 worker 数选择、需要容错时使用 `PARALLEL=OFF`）。

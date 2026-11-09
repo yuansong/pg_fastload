@@ -46,7 +46,7 @@
 #include "logger.h"
 
 #if PG_VERSION_NUM >= 190000
-#error unsupported PostgreSQL version
+#include "nbtree/nbtsort-19.c"
 #elif PG_VERSION_NUM >= 180000
 #include "nbtree/nbtsort-18.c"
 #elif PG_VERSION_NUM >= 170000
@@ -873,12 +873,11 @@ BTReaderInit(BTReader *reader, Relation rel)
 	 * smgropen *after* RelationSetNewRelfilenode.
 	 */
 	memset(&reader->smgr, 0, sizeof(reader->smgr));
-#if PG_VERSION_NUM >= 170000
+#if PG_VERSION_NUM >= 160000
 	reader->smgr.smgr_rlocator.locator = rel->rd_locator;
-	reader->smgr.smgr_rlocator.backend = rel->rd_backend == MyBackendType ? MyBackendType : InvalidCommandId;
-#elif PG_VERSION_NUM >= 160000
-	reader->smgr.smgr_rlocator.locator = rel->rd_locator;
-	reader->smgr.smgr_rlocator.backend = rel->rd_backend == MyBackendId ? MyBackendId : InvalidBackendId;
+	reader->smgr.smgr_rlocator.backend =
+		rel->rd_backend == FastloadBackendNumber ? FastloadBackendNumber
+		: FastloadInvalidBackend;
 #elif PG_VERSION_NUM >= 90100
 	reader->smgr.smgr_rnode.node = rel->rd_node;
 	reader->smgr.smgr_rnode.backend =

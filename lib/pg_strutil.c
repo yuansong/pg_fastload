@@ -46,7 +46,19 @@
 
 #endif
 
-#if PG_VERSION_NUM >= 140000
+#if PG_VERSION_NUM >= 190000
+
+/*
+ * PostgreSQL 19 added an output parameter for lookup diagnostics.  It is
+ * dereferenced unconditionally, so a throw-away int must be supplied; the
+ * flags themselves are only useful for building error messages, which the
+ * loader does not do on this path.
+ */
+#define FuncnameGetCandidates(names, nargs, NIL, expand_variadic, expand_defaults) \
+	FuncnameGetCandidates(names, nargs, NIL, expand_variadic, expand_defaults, \
+						  false, false, (int[1]) {0})
+
+#elif PG_VERSION_NUM >= 140000
 
 #define FuncnameGetCandidates(names, nargs, NIL, expand_variadic, expand_defaults) \
 	FuncnameGetCandidates(names, nargs, NIL, expand_variadic, expand_defaults, false, false)

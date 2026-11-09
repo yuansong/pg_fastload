@@ -13,6 +13,16 @@
 #if PG_VERSION_NUM >= 170000
 #include "utils/palloc.h"
 #endif
+
+#if PG_VERSION_NUM >= 190000
+/*
+ * PostgreSQL 19 moved the Datum typedef from c.h into postgres.h, which the
+ * client-side code cannot include.  The node headers below still refer to
+ * Datum, so provide the very same definition here.
+ */
+typedef uint64_t Datum;
+#endif
+
 #include "nodes/pg_list.h"
 
 /*

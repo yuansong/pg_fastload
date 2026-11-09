@@ -198,6 +198,22 @@ extern Datum ExecFetchSlotTupleDatum(TupleTableSlot *slot);
 	FuncnameGetCandidates((names), (nargs), (variadic), (defaults))
 #endif
 
+/*
+ * Identifying the process that owns a temporary relation.
+ *
+ * PostgreSQL 17 replaced BackendId with ProcNumber (rd_backend and
+ * RelFileLocatorBackend.backend both became ProcNumbers), and PostgreSQL 19
+ * removed the BackendId API altogether, so MyBackendId no longer exists.
+ */
+#if PG_VERSION_NUM >= 170000
+#include "storage/procnumber.h"
+#define FastloadBackendNumber	MyProcNumber
+#define FastloadInvalidBackend	INVALID_PROC_NUMBER
+#else
+#define FastloadBackendNumber	MyBackendId
+#define FastloadInvalidBackend	InvalidBackendId
+#endif
+
 #if PG_VERSION_NUM < 90000
 #define GetConfigOption(name, missing_ok, restrict_superuser) \
 	GetConfigOption((name))
