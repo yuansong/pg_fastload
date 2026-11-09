@@ -10,7 +10,7 @@
  *
  *   The leader backend keeps stage (4) WriterInsert() strictly serial, and
  *   delegates stages (1)(2)(3) to 1 reader + N parser backend processes
- *   registered with RegisterDynamicBackgroundWorker() (plan C): the reader
+ *   registered with RegisterDynamicBackgroundWorker(): the reader
  *   walks the input once and routes records into per-worker reader->worker
  *   shm_mq input queues, each worker parses its queue and streams tuples
  *   back over a second PostgreSQL native shm_mq, all inside one DSM
@@ -429,8 +429,8 @@ fastload_wait_reader_ready(FastloadShared *hdr, BackgroundWorkerHandle *rhandle)
 }
 
 /*
- * Run stages (1)(2)(3) in one reader + N parse workers and stage (4) here
- * (plan C).  The reader walks the input file once and routes records into
+ * Run stages (1)(2)(3) in one reader + N parse workers and stage (4) here.
+ * The reader walks the input file once and routes records into
  * per-worker reader->worker shm_mq input queues; workers parse their queue
  * and stream tuples back over per-worker return shm_mq handles.  Requires
  * max_worker_processes to cover nworkers + 1 background workers.

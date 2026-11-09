@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="700" viewBox="0 0 1240 700" font-family="Segoe UI, Helvetica Neue, Arial, Noto Sans, sans-serif">
+  <defs>
+    <marker id="fw" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0.6 L 10 5 L 0 9.4 z" fill="#475569"/>
+    </marker>
+    <marker id="rv" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0.6 L 10 5 L 0 9.4 z" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1240" height="700" fill="#ffffff"/>
+
+  <!-- ============ title ============ -->
+  <text x="28" y="46" font-size="23" font-weight="700" fill="#0f172a">pg_fastload Architecture</text>
+  <text x="28" y="72" font-size="12.4" fill="#475569">Single reader, many parsers: one reader process scans the file once, N parser processes build tuples in parallel, the leader process writes serially.</text>
+
+  <!-- ============ stage badges ============ -->
+  <g font-size="11" font-weight="600">
+    <circle cx="196" cy="106" r="10" fill="#4f46e5"/>
+    <text x="196" y="110" font-size="11" fill="#ffffff" text-anchor="middle">1</text>
+    <text x="212" y="110" fill="#312e81">read</text>
+
+    <circle cx="648" cy="106" r="10" fill="#2563eb"/>
+    <text x="648" y="110" font-size="11" fill="#ffffff" text-anchor="middle">2</text>
+    <text x="664" y="110" fill="#1e3a8a">parse</text>
+    <circle cx="730" cy="106" r="10" fill="#2563eb"/>
+    <text x="730" y="110" font-size="11" fill="#ffffff" text-anchor="middle">3</text>
+    <text x="746" y="110" fill="#1e3a8a">form tuple</text>
+
+    <circle cx="1100" cy="106" r="10" fill="#d97706"/>
+    <text x="1100" y="110" font-size="11" fill="#ffffff" text-anchor="middle">4</text>
+    <text x="1116" y="110" fill="#78350f">write</text>
+  </g>
+
+  <!-- ============ input file ============ -->
+  <rect x="28" y="156" width="150" height="150" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="44" y="190" font-size="13" font-weight="700" fill="#0f172a">Input file</text>
+  <text x="44" y="214" font-size="10.2" fill="#334155">CSV · BINARY · FIXED</text>
+  <text x="44" y="248" font-size="10.2" fill="#475569">opened by the reader</text>
+  <text x="44" y="266" font-size="10.2" fill="#475569">read exactly once</text>
+  <text x="44" y="290" font-size="10" fill="#64748b">never N re-reads</text>
+
+  <!-- ============ reader process ============ -->
+  <rect x="214" y="126" width="200" height="200" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.6"/>
+  <text x="228" y="156" font-size="12" font-weight="700" fill="#1e1b4b">reader background worker</text>
+  <rect x="226" y="166" width="158" height="18" rx="9" fill="#fee2e2" stroke="#ef4444" stroke-width="1"/>
+  <text x="305" y="179" font-size="8.6" font-weight="700" fill="#b91c1c" text-anchor="middle">separate OS process, not a thread</text>
+
+  <g font-size="10.2" fill="#1e293b">
+    <text x="228" y="208">• sequential scan, 1 MiB reads</text>
+    <text x="228" y="230">• quote-aware record boundaries</text>
+    <text x="228" y="252">• SKIP / LIMIT global window</text>
+    <text x="228" y="274">• 512 KiB round-robin chunks</text>
+  </g>
+  <line x1="228" y1="286" x2="400" y2="286" stroke="#c7d2fe" stroke-width="1"/>
+  <text x="228" y="304" font-size="9.4" fill="#4338ca">no database connection</text>
+  <text x="228" y="318" font-size="9.4" fill="#4338ca">(shared-memory access only)</text>
+
+  <!-- ============ input queues ============ -->
+  <rect x="450" y="146" width="136" height="170" rx="10" fill="#ecfdf5" stroke="#14b8a6" stroke-width="1.4"/>
+  <text x="462" y="176" font-size="11.6" font-weight="700" fill="#134e4a">input queues ×N</text>
+  <text x="462" y="202" font-size="10.2" fill="#0f766e">shm_mq</text>
+  <text x="462" y="222" font-size="10.2" fill="#0f766e">8 MiB each</text>
+  <text x="462" y="242" font-size="10.2" fill="#0f766e">key 66 … 65+N</text>
+  <line x1="462" y1="258" x2="574" y2="258" stroke="#99f6e4" stroke-width="1"/>
+  <text x="462" y="278" font-size="9.9" fill="#115e59">reader → worker</text>
+  <text x="462" y="298" font-size="9.4" fill="#64748b">one queue per worker</text>
+
+  <!-- ============ parser processes ============ -->
+  <rect x="622" y="126" width="200" height="200" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.6"/>
+  <text x="636" y="156" font-size="12" font-weight="700" fill="#1e3a8a">parser processes ×N</text>
+  <rect x="634" y="166" width="122" height="18" rx="9" fill="#dbeafe" stroke="#60a5fa" stroke-width="1"/>
+  <text x="640" y="179" font-size="9.5" font-weight="700" fill="#1d4ed8">worker #0 … #N-1</text>
+
+  <g font-size="10.2" fill="#1e293b">
+    <text x="636" y="208">• pulls records in batches</text>
+    <text x="636" y="230">• field split (CSV / fixed)</text>
+    <text x="636" y="252">• column input → Datum</text>
+    <text x="636" y="274">• heap_form_tuple()</text>
+  </g>
+  <line x1="636" y1="286" x2="808" y2="286" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="636" y="304" font-size="9.4" fill="#1e40af">N = PARALLEL_WORKERS</text>
+  <text x="636" y="318" font-size="9.4" fill="#1e40af">default CPU count − 1, max 64</text>
+
+  <!-- ============ return queues ============ -->
+  <rect x="858" y="146" width="136" height="170" rx="10" fill="#ecfdf5" stroke="#14b8a6" stroke-width="1.4"/>
+  <text x="870" y="176" font-size="11.6" font-weight="700" fill="#134e4a">return queues ×N</text>
+  <text x="870" y="202" font-size="10.2" fill="#0f766e">shm_mq</text>
+  <text x="870" y="222" font-size="10.2" fill="#0f766e">2 MiB each</text>
+  <text x="870" y="242" font-size="10.2" fill="#0f766e">key 2 … 1+N</text>
+  <line x1="870" y1="258" x2="982" y2="258" stroke="#99f6e4" stroke-width="1"/>
+  <text x="870" y="278" font-size="9.9" fill="#115e59">worker → leader</text>
+  <text x="870" y="298" font-size="9.4" fill="#64748b">1 message = 1 tuple</text>
+
+  <!-- ============ leader ============ -->
+  <rect x="1030" y="126" width="180" height="200" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.6"/>
+  <text x="1044" y="156" font-size="11.8" font-weight="700" fill="#78350f">leader (main backend)</text>
+  <text x="1044" y="174" font-size="9.4" fill="#92400e">the session calling pg_fastload()</text>
+
+  <g font-size="9.9" fill="#1e293b">
+    <text x="1044" y="202">• capability check, DSM</text>
+    <text x="1044" y="224">• registers 1 + N bgworkers</text>
+    <text x="1044" y="246">• receives, copies tuples</text>
+    <text x="1044" y="268">• serial WriterInsert()</text>
+    <text x="1044" y="290">• WriterClose, cleanup</text>
+  </g>
+  <rect x="1042" y="300" width="156" height="20" rx="6" fill="#dcfce7" stroke="#22c55e" stroke-width="1"/>
+  <text x="1120" y="314" font-size="9.2" font-weight="700" fill="#14532d" text-anchor="middle">heap table + indexes</text>
+
+  <!-- ============ data-flow arrows ============ -->
+  <line x1="178" y1="226" x2="212" y2="226" stroke="#475569" stroke-width="2.2" marker-end="url(#fw)"/>
+  <line x1="414" y1="226" x2="448" y2="226" stroke="#475569" stroke-width="2.2" marker-end="url(#fw)"/>
+  <line x1="586" y1="226" x2="620" y2="226" stroke="#475569" stroke-width="2.2" marker-end="url(#fw)"/>
+  <line x1="822" y1="226" x2="856" y2="226" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#rv)"/>
+  <line x1="994" y1="226" x2="1028" y2="226" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#rv)"/>
+
+  <!-- ============ DSM bracket ============ -->
+  <path d="M 518 316 L 518 348 L 926 348 L 926 316" fill="none" stroke="#0d9488" stroke-width="1.6" stroke-dasharray="5 4"/>
+  <text x="722" y="370" font-size="10.1" fill="#0f766e" text-anchor="middle">both queue sets live in one DSM segment: key 0 control · key 1 params · key 2… return · key 66… input</text>
+
+  <!-- ============ panel: process vs thread ============ -->
+  <rect x="28" y="388" width="580" height="196" rx="10" fill="#fff7ed" stroke="#fdba74" stroke-width="1.4"/>
+  <text x="46" y="416" font-size="12.6" font-weight="700" fill="#7c2d12">Why the reader is a process, not a thread</text>
+  <g font-size="10.3" fill="#431407">
+    <text x="46" y="446">PostgreSQL forks one process per connection: a backend cannot spawn threads.</text>
+    <text x="46" y="468">Memory contexts, GUCs, syscache and snapshots are all process-scoped, not thread-safe.</text>
+    <text x="46" y="496">So the parallel subsystem uses native bgworkers: the reader and every worker is a</text>
+    <text x="46" y="518">separate OS process holding its own PGPROC, memory context and transaction state.</text>
+    <text x="46" y="546">Processes exchange bytes only through DSM — no custom locks, no thread races.</text>
+  </g>
+  <text x="46" y="572" font-size="9.8" fill="#9a3412">Contrast: pg_bulkload's WRITER=PARALLEL starts a second backend over a SysV IPC queue.</text>
+
+  <!-- ============ panel: division of labour ============ -->
+  <rect x="628" y="388" width="584" height="196" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+  <text x="646" y="416" font-size="12.6" font-weight="700" fill="#0f172a">Division of labour and fallback</text>
+  <g font-size="10.3" fill="#334155">
+    <text x="646" y="446">Stages 1–3 spread over N processes; stage 4 stays serial in the leader — WriterInsert()</text>
+    <text x="646" y="468">rewrites the tuple header in place (infomask / xmin / t_self / t_ctid), so concurrent writers</text>
+    <text x="646" y="490">on one heap would only buy lock and WAL contention.</text>
+    <text x="646" y="518">Parallelism is opt-in: only PARALLEL=ON takes the multi-process path; PARALLEL=OFF matches</text>
+    <text x="646" y="540">the original single-process pipeline bit for bit.</text>
+  </g>
+  <text x="646" y="566" font-size="9.8" fill="#64748b">FILTER, FORCE_NOT_NULL, encoding conversion, constraint checks, PARSE_ERRORS, STDIN,</text>
+  <text x="646" y="580" font-size="9.8" fill="#64748b">dropped columns and WRITER=PARALLEL log one INFO and fall back to the serial path.</text>
+
+  <!-- ============ footer prerequisites ============ -->
+  <rect x="28" y="604" width="1184" height="74" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <text x="46" y="628" font-size="11.4" font-weight="700" fill="#0f172a">Requirement</text>
+  <text x="46" y="650" font-size="10.4" fill="#334155">max_worker_processes ≥ PARALLEL_WORKERS + 1 (N parser processes + 1 reader process)</text>
+  <text x="46" y="668" font-size="9.8" fill="#64748b">shared_preload_libraries needs no change</text>
+
+  <text x="660" y="628" font-size="11.4" font-weight="700" fill="#0f172a">Footprint</text>
+  <text x="660" y="650" font-size="10.4" fill="#334155">DSM ≈ header + params + N × (8 MiB input + 2 MiB return); 15 workers ≈ 150 MiB</text>
+  <text x="660" y="668" font-size="9.8" fill="#64748b">max record size 256 MiB; file I/O is always 1×</text>
+</svg>

@@ -1,0 +1,15 @@
+# Normalize line endings: LF in the repository and in the working tree.
+#
+# The C sources inherited from pg_bulkload used to be CRLF in some checkouts.
+# Keeping everything LF makes diffs, patches and CI stable across platforms.
+* text=auto eol=lf
+
+# Binary assets must never be converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.so  binary
+*.o   binary
+*.zip binary

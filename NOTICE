@@ -42,13 +42,19 @@ What was added / changed
   file and all build artifacts were renamed from pg_bulkload to pg_fastload.
 * Version reset to 1.0.0 for the independent project.
 * New control-file keywords PARALLEL and PARALLEL_WORKERS.
-* TYPE=CSV with PARALLEL=ON now uses multiple PostgreSQL background worker
-  processes for stages (1)(2)(3); stage (4) stays serial.
+* TYPE=CSV, TYPE=BINARY and TYPE=FIXED with PARALLEL=ON now use multiple
+  PostgreSQL background worker processes for stages (1)(2)(3); stage (4)
+  stays serial.
 * New modules: lib/fastload_parallel.c, lib/fastload_worker.c,
   include/fastload_parallel.h.
-* Removed: the earlier experimental "CSVMT" TYPE and lib/parser_csv_mt.c.
-  The parallel implementation is exposed as plain TYPE=CSV, not a new type.
-* New documentation: README.md, docs/ARCHITECTURE.md,
-  docs/PARALLEL_DESIGN.md, docs/CHANGES.md.
+* Removed: an earlier experimental multi-threaded CSV prototype, together
+  with its parser source file and build entry. The parallel implementation
+  is exposed as plain TYPE=CSV / BINARY / FIXED, never as a new TYPE.
+* New documentation (Chinese and English): README.md, README.en.md,
+  docs/USER_MANUAL.md, docs/USER_MANUAL.en.md, docs/ARCHITECTURE.md,
+  docs/ARCHITECTURE.en.md, docs/CHANGES.md, docs/BENCHMARK.md,
+  docs/VERIFICATION.md, docs/OPTIMIZATION.md, docs/img/architecture*.svg.
+  The inherited HTML manual has been removed: its numbers date from the
+  PostgreSQL 9.3 era and its content is superseded by USER_MANUAL*.md.
 
 See docs/CHANGES.md for the complete file-level modification list.
