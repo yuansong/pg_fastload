@@ -1,10 +1,10 @@
 /*
- * pg_bulkload: lib/writer_direct.c
+ * pg_fastload: lib/writer_direct.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
 
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -187,8 +187,8 @@ DirectWriterInit(DirectWriter *self)
 				self->base.max_dup_errors, self->base.dup_badfile);
 	self->base.context = GetPerTupleMemoryContext(self->spooler.estate);
 
-	/* Verify DataDir/pg_bulkload directory */
-	ValidateLSFDirectory(BULKLOAD_LSF_DIR);
+	/* Verify DataDir/pg_fastload directory */
+	ValidateLSFDirectory(FASTLOAD_LSF_DIR);
 
 	/* Initialize first block */
 	PageInit(GetCurrentPage(self), BLCKSZ, 0);
@@ -217,7 +217,7 @@ DirectWriterInit(DirectWriter *self)
 	 * error because recovery process haven't been executed after failing
 	 * load to the same table.
 	 */
-	BULKLOAD_LSF_PATH(self->lsf_path, ls);
+	FASTLOAD_LSF_PATH(self->lsf_path, ls);
 #if PG_VERSION_NUM >= 110000
 	self->lsf_fd = BasicOpenFilePerm(self->lsf_path,
 		O_CREAT | O_EXCL | O_RDWR | PG_BINARY, S_IRUSR | S_IWUSR);
@@ -261,7 +261,7 @@ DirectWriterInsert(DirectWriter *self, HeapTuple tuple)
 #else
 		tuple = toast_insert_or_update(self->base.rel, tuple, NULL, 0);
 #endif
-	BULKLOAD_PROFILE(&prof_writer_toast);
+	FASTLOAD_PROFILE(&prof_writer_toast);
 
 #if PG_VERSION_NUM < 120000
 	/* Assign oids if needed. */
@@ -318,9 +318,9 @@ DirectWriterInsert(DirectWriter *self, HeapTuple tuple)
 	item = PageGetItem(page, itemId);
 	((HeapTupleHeader) item)->t_ctid = tuple->t_self;
 
-	BULKLOAD_PROFILE(&prof_writer_table);
+	FASTLOAD_PROFILE(&prof_writer_table);
 	SpoolerInsert(&self->spooler, tuple);
-	BULKLOAD_PROFILE(&prof_writer_index);
+	FASTLOAD_PROFILE(&prof_writer_index);
 }
 
 /**
@@ -466,7 +466,7 @@ DirectWriterSendQuery(DirectWriter *self, PGconn *conn, char *queueName, char *l
 	params[7] = (self->base.truncate ? "true" : "no");
 
 	return PQsendQueryParams(conn,
-		"SELECT * FROM pgbulkload.pg_bulkload(ARRAY["
+		"SELECT * FROM pgfastload.pg_fastload(ARRAY["
 		"'TYPE=TUPLE',"
 		"'INPUT=' || $1,"
 		"'WRITER=DIRECT',"
@@ -511,29 +511,29 @@ flush_pages(DirectWriter *loader)
 		return;		/* no work */
 
 	/*
-	 * Log the first page that pg_bulkload adds to WAL to ensure the current
+	 * Log the first page that pg_fastload adds to WAL to ensure the current
 	 * XID will be recorded in xlog.
 	 *
 	 * In recovery mode, PostgreSQL recognizes the current XID which was
 	 * already assigned by reading through the xlog.
 	 *
-	 * As for pg_bulkload, if the first page WAL entry were not recorded,
+	 * As for pg_fastload, if the first page WAL entry were not recorded,
 	 * PostgreSQL would not remember the XID being used for this loading.
 	 * This may cause an inconsistent database state after recovery.
 	 *
 	 * For example,
-	 * 1. pg_bulkload is started in XID=1111.
+	 * 1. pg_fastload is started in XID=1111.
 	 * 2. PostgreSQL process crashes during the loading.
 	 * 3. PostgreSQL drops all existing connections and begins crash recovery
-	 *    with xlog. If pg_bulkload had not logged the first page, PostgreSQL
+	 *    with xlog. If pg_fastload had not logged the first page, PostgreSQL
 	 *    would (wrongly) fail to recognize that 1111 has been used.
 	 * 4. After recovery, a new transaction would get 1111 as XID. If that
 	 *    transaction commits eventually, the data insufficiently loaded by
-	 *    pg_bulkload would be incorrectly visible because the loaded data
+	 *    pg_fastload would be incorrectly visible because the loaded data
 	 *    would have the same XID.
 	 *
 	 * In order to prevent that, we arrange that the first page added by
-	 * pg_bulkload is logged to WAL.
+	 * pg_fastload is logged to WAL.
 	 */
 #if PG_VERSION_NUM >= 90100
 	if (ls->ls.create_cnt == 0 && !RELATION_IS_LOCAL(loader->base.rel)
@@ -792,13 +792,13 @@ ValidateLSFDirectory(const char *path)
 		/* Check for weird cases where it exists but isn't a directory */
 		if (!S_ISDIR(stat_buf.st_mode))
 			ereport(ERROR,
-			(errmsg("pg_bulkload: required LSF directory \"%s\" does not exist",
+			(errmsg("pg_fastload: required LSF directory \"%s\" does not exist",
 							path)));
 	}
 	else
 	{
 		ereport(LOG,
-				(errmsg("pg_bulkload: creating missing LSF directory \"%s\"", path)));
+				(errmsg("pg_fastload: creating missing LSF directory \"%s\"", path)));
 		if (mkdir(path, 0700) < 0)
 			ereport(ERROR,
 					(errmsg("could not create missing directory \"%s\": %m",

@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/parser_csv.c
+ * pg_fastload: lib/parser_csv.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
@@ -8,7 +8,7 @@
  * @file
  * @brief CSV format file handling module implementation.
  */
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include "access/heapam.h"
 #include "access/htup.h"
@@ -483,10 +483,10 @@ skip_done:
 				self->cur = self->rec_buf;
 			}
 
-			BULKLOAD_PROFILE(&prof_reader_parser);
+			FASTLOAD_PROFILE(&prof_reader_parser);
 			ret = SourceRead(self->source, self->rec_buf + self->used_len,
 								self->buf_len - self->used_len - 1);
-			BULKLOAD_PROFILE(&prof_reader_source);
+			FASTLOAD_PROFILE(&prof_reader_source);
 			if (ret == 0)
 			{
 				self->eof = true;

@@ -122,12 +122,12 @@
     <LibraryPath Condition="'$(Configuration)|$(Platform)'=='8.4|x64'">C:\Program Files %28x86%29\PostgreSQL\8.4\lib;$(LibraryPath)</LibraryPath>
     <LibraryPath Condition="'$(Configuration)|$(Platform)'=='8.3|Win32'">C:\Program Files %28x86%29\PostgreSQL\8.3\lib;$(LibraryPath)</LibraryPath>
     <LibraryPath Condition="'$(Configuration)|$(Platform)'=='8.3|x64'">C:\Program Files %28x86%29\PostgreSQL\8.3\lib;$(LibraryPath)</LibraryPath>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|Win32'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|x64'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|Win32'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|x64'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|Win32'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|x64'">pg_bulkload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|Win32'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|x64'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|Win32'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|x64'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|Win32'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|x64'">pg_fastload</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='9.0|Win32'">
     <ClCompile>
@@ -290,7 +290,7 @@
     <ClCompile Include="..\lib\parser_tuple.c" />
     <ClCompile Include="..\lib\pgut\pgut-pthread.c" />
     <ClCompile Include="..\lib\pg_btree.c" />
-    <ClCompile Include="..\lib\pg_bulkload.c" />
+    <ClCompile Include="..\lib\pg_fastload.c" />
     <ClCompile Include="..\lib\pg_strutil.c" />
     <ClCompile Include="..\lib\pgut\pgut-be.c" />
     <ClCompile Include="..\lib\pgut\pgut-ipc.c" />
@@ -303,7 +303,7 @@
   <ItemGroup>
     <ClInclude Include="..\include\logger.h" />
     <ClInclude Include="..\include\pg_btree.h" />
-    <ClInclude Include="..\include\pg_bulkload.h" />
+    <ClInclude Include="..\include\pg_fastload.h" />
     <ClInclude Include="..\include\pg_loadstatus.h" />
     <ClInclude Include="..\include\pg_profile.h" />
     <ClInclude Include="..\include\pg_strutil.h" />
@@ -314,8 +314,8 @@
     <ClInclude Include="..\lib\pgut\pgut-pthread.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\lib\pg_bulkload.sql.in" />
-    <None Include="..\lib\uninstall_pg_bulkload.sql" />
+    <None Include="..\lib\pg_fastload.sql.in" />
+    <None Include="..\lib\uninstall_pg_fastload.sql" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

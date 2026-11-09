@@ -17,7 +17,7 @@
 
 <p>
 pg_timestamp ia an optional tool to skip parsing overhead of timestamp string.
-This is involved in a pg_bulkload package.
+This is involved in a pg_fastload package.
 </p>
 
 <h3>pg_timestamp_in</h3>
@@ -43,8 +43,8 @@ Installation sequence is shown below. As a preliminary, the permissions of direc
 </p>
 <pre><code>
 $ cd [directory where postgresql-8.2or3.X.tar.gz is untared]/contrib/
-$ tar zxvf pg_bulkload-2.3.X.tar.gz
-$ cd pg_bulkload
+$ tar zxvf pg_fastload-2.3.X.tar.gz
+$ cd pg_fastload
 $ make
 $ make install
 $ postgresql start

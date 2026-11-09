@@ -3,13 +3,13 @@
 #
 # postgresql-- a wrapper script of pg_ctl
 #
-#    - NOTE: If you use pg_bulkload, you must use this script instead of pg_ctl.
+#    - NOTE: If you use pg_fastload, you must use this script instead of pg_ctl.
 #      + This script calls our own recovery process solving clash while data is
-#        loaded with pg_bulkload.
+#        loaded with pg_fastload.
 #
 #    - You can give all of the pg_ctl options to this script.
 #    - If given command to PostgreSQL is not start or restart,
-#      this script doesn't execute pg_bulkload's recovery and call pg_ctl 
+#      this script doesn't execute pg_fastload's recovery and call pg_ctl 
 #      directory.
 #
 # Copyright (c) 2007-2026, NTT, Inc.
@@ -20,7 +20,7 @@ CMDNAME=`basename $0`
 
 # postgresql help message (allmost all of the following is as same as pg_ctl)
 help="\
-$CMDNAME is a utility to start pg_bulkload -r and to start, stop, restart,
+$CMDNAME is a utility to start pg_fastload -r and to start, stop, restart,
 reload configuration files, report the status of a PostgreSQL server, 
 or signal a PostgreSQL process.
 
@@ -90,8 +90,8 @@ while [ $# -gt 0 ];do
         exit 0
         ;;
     -V|--version)
-        # Show a version of pg_bulkload and PostgreSQL and exit normally
-        echo "pg_bulkload 3.1.15"
+        # Show a version of pg_fastload and PostgreSQL and exit normally
+        echo "pg_fastload 3.1.15"
         pg_ctl --version
         exit 0
         ;;
@@ -283,13 +283,13 @@ fi
 
 # restart option in this script is executed as the following 3 steps:
 #    1. pg_ctl stop
-#    2. pg_bulkload recovery
+#    2. pg_fastload recovery
 #    3. pg_ctl start
 # 
 # In this sequence, "stop" operation must be executed 
-# before starting pg_bulkload recovery, in order to refrain from executing 
+# before starting pg_fastload recovery, in order to refrain from executing 
 # recovery while PostgreSQL is running.
-# After "pg_ctl stop" and pg_bulkload recovery, arguments for "pg_ctl start" 
+# After "pg_ctl stop" and pg_fastload recovery, arguments for "pg_ctl start" 
 # are processed.
 # Note: We don't check exit status after "pg_ctl stop", which is as same 
 # behavior as pg_ctl restart.
@@ -299,21 +299,21 @@ if [ "$op" = "restart" ];then
     ##ARGUMENTS=`echo "$ARGUMENTS" | sed 's/stop/start/g'`
 
 		# If "restart" is given, we must ensure that the server shutdown has
-		# been completed before starting pg_bulkload recovery.
+		# been completed before starting pg_fastload recovery.
     eval "pg_ctl $PG_CTL_ARGS -w stop"
 		if [ "$?" -ne 0 ]; then
 			exit 1
 		fi
 fi
 
-# If "start" or "restart" is given, pg_bulkload recovery is executed before 
+# If "start" or "restart" is given, pg_fastload recovery is executed before 
 # pg_ctl start.
 # The path of $PGDATA is passed to recovery command as arguments.
 # 
 # If recovery command exits in abnormal status, this script doesn't execute 
 # pg_ctl and exits 1.
 if [ "$op" = "start" -o "$op" = "restart" ];then
-     pg_bulkload -r -D $PGDATA
+     pg_fastload -r -D $PGDATA
    
 
     if [ "$?" -ne 0 ];then

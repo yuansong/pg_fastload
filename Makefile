@@ -1,5 +1,5 @@
 #
-# pg_bulkload: Makefile
+# pg_fastload: Makefile
 #
 #    Copyright (c) 2007-2026, NTT, Inc.
 #
@@ -16,7 +16,7 @@ PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 else
-subdir = pg_bulkload
+subdir = pg_fastload
 include $(makefile_global)
 include $(top_srcdir)/contrib/contrib-global.mk
 endif

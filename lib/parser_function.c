@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/parser_function.c
+ * pg_fastload: lib/parser_function.c
  *
  *	  Copyright (c) 2009-2026, NTT, Inc.
  */
@@ -407,7 +407,7 @@ FunctionParserRead(FunctionParser *self, Checker *checker)
 	 */
 	if (self->rsinfo.setResult)
 	{
-		BULKLOAD_PROFILE(&prof_reader_source);
+		FASTLOAD_PROFILE(&prof_reader_source);
 
 restart:
 
@@ -428,7 +428,7 @@ restart:
 		return &self->tuple;
 	}
 
-	BULKLOAD_PROFILE(&prof_reader_parser);
+	FASTLOAD_PROFILE(&prof_reader_parser);
 
 #if PG_VERSION_NUM >= 120000
 	pgstat_init_function_usage(self->fcinfo, &fcusage);
@@ -451,7 +451,7 @@ restart:
 	pgstat_end_function_usage(&fcusage,
 							  self->rsinfo.isDone != ExprMultipleResult);
 
-	BULKLOAD_PROFILE(&prof_reader_source);
+	FASTLOAD_PROFILE(&prof_reader_source);
 
 	/* Which protocol does function want to use? */
 	if (self->rsinfo.returnMode == SFRM_ValuePerCall)

@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/nbtree/nbtsort-common.c
+ * pg_fastload: lib/nbtree/nbtsort-common.c
  *
  * NOTES
  *

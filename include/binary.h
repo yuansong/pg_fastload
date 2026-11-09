@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: include/binary.h
+ * pg_fastload: include/binary.h
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
  */
@@ -35,5 +35,17 @@ struct Field
 extern void BinaryParam(Field **fields, int *nfield, char *value, bool preserve_blanks, bool length_only);
 extern int BinaryDumpParam(Field *field, StringInfo buf, int offset);
 extern void BinaryDumpParams(Field *fields, int nfield, StringInfo buf, char *param);
+
+/*
+ * Parallel (BINARY/FIXED) support: the leader backend serializes its parsed
+ * COL field descriptors into the DSM parameter block and each parse worker
+ * rebuilds its own Field array (read function resolved from the static
+ * TYPES table, work buffers freshly allocated) without re-parsing the
+ * control file.
+ */
+extern void BinaryParserGetMeta(Parser *self, int *nfield, size_t *rec_len, Field **fields);
+extern Size BinarySerializedSize(const Field *fields, int nfield);
+extern Size BinarySerializeFields(const Field *fields, int nfield, char *dest);
+extern void BinaryDeserializeFields(const char *src, int nfield, Field **out);
 
 #endif   /* BINARY_H_INCLUDED */

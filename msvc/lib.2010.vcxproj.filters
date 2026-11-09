@@ -29,7 +29,7 @@
     <ClCompile Include="..\lib\pg_btree.c">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\lib\pg_bulkload.c">
+    <ClCompile Include="..\lib\pg_fastload.c">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\lib\pg_strutil.c">
@@ -67,7 +67,7 @@
     <ClInclude Include="..\include\pg_btree.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\pg_bulkload.h">
+    <ClInclude Include="..\include\pg_fastload.h">
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="..\include\pg_loadstatus.h">
@@ -96,7 +96,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\lib\pg_bulkload.sql.in" />
-    <None Include="..\lib\uninstall_pg_bulkload.sql" />
+    <None Include="..\lib\pg_fastload.sql.in" />
+    <None Include="..\lib\uninstall_pg_fastload.sql" />
   </ItemGroup>
 </Project>

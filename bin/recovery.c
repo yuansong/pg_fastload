@@ -1,12 +1,12 @@
 /*
- * pg_bulkload: bin/recovery.c
+ * pg_fastload: bin/recovery.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
 
 /**
  *	@file
- *	@brief Recovery routine for pg_bulkload.
+ *	@brief Recovery routine for pg_fastload.
  */
 #include "postgres_fe.h"
 
@@ -179,7 +179,7 @@ StartLoaderRecovery(void)
 
 		lsfname = (char *) lfirst(cur);
 
-		snprintf(lsfpath, MAXPGPATH, BULKLOAD_LSF_DIR "/%s", lsfname);
+		snprintf(lsfpath, MAXPGPATH, FASTLOAD_LSF_DIR "/%s", lsfname);
 
 		/*
 		 * if database cluster has abnormally shutdown,
@@ -196,7 +196,7 @@ StartLoaderRecovery(void)
 			 * XXX :need to store relaion name?
 			 */
 			elog(NOTICE,
-				 "Starting pg_bulkload recovery for file \"%s\"",
+				 "Starting pg_fastload recovery for file \"%s\"",
 				 lsfname);
 
 			/*
@@ -212,7 +212,7 @@ StartLoaderRecovery(void)
 							ls.ls.exist_cnt + ls.ls.create_cnt);
 
 			elog(NOTICE,
-				 "Ended pg_bulkload recovery for file \"%s\"",
+				 "Ended pg_fastload recovery for file \"%s\"",
 				 lsfname);
 		}
 
@@ -269,12 +269,12 @@ GetLSFList(void)
 	Assert(DataDir != NULL);
 
 	/*
-	 * If neither $PGDATA/pg_bulkload directory nor ".loadstatus"
+	 * If neither $PGDATA/pg_fastload directory nor ".loadstatus"
 	 * file in it exists, we return the empty list and skip doing
 	 * recovery. Otherwise, we add the name of found LSF into
 	 * the list, then return it.
 	 */
-	if ((dir = opendir(BULKLOAD_LSF_DIR)) == NULL)
+	if ((dir = opendir(FASTLOAD_LSF_DIR)) == NULL)
 		return NIL;
 
 	while ((dp = readdir(dir)) != NULL)
@@ -295,7 +295,7 @@ GetLSFList(void)
 	if (closedir(dir) == -1)
 		elog(ERROR,
 			 "could not close LSF Directory \"%s\": %s",
-			 BULKLOAD_LSF_DIR, strerror(errno));
+			 FASTLOAD_LSF_DIR, strerror(errno));
 
 	return list;
 }
@@ -353,7 +353,7 @@ GetDBClusterState(const char *fname)
 
 /**
  * @brief Get number of blocks at loading start time,
- *	number of blocks made by pg_bulkload, and first data file name.
+ *	number of blocks made by pg_fastload, and first data file name.
  *
  * Processing flow
  * <ol>
@@ -394,7 +394,7 @@ GetLoadStatusInfo(const char *lsfpath, LoadStatus * ls)
 }
 
 /**
- * @brief Overwrite pages created by pg_bulkload by blank pages.
+ * @brief Overwrite pages created by pg_fastload by blank pages.
  *
  * Processing flow
  * <ol>
@@ -428,7 +428,7 @@ ClearLoadedPage(
 	ssize_t		ret;				/* return value of read()  */
 	ssize_t		readlen;			/* size of data read by read()	*/
 
-	/* if no block is created by pg_bulkload, no work needed. */
+	/* if no block is created by pg_fastload, no work needed. */
 	if (blkbeg <= blkend)
 		return;
 
@@ -483,7 +483,7 @@ ClearLoadedPage(
 		ret = 0;
 
 		/*
-		 * to judge the page is created by pg_bulkload or not,
+		 * to judge the page is created by pg_fastload or not,
 		 * read target blocks.
 		 */
 		do
@@ -512,7 +512,7 @@ ClearLoadedPage(
 
 
 		/*
-		 * if page is created by pg_bulkload, overwrite it by blank page.
+		 * if page is created by pg_fastload, overwrite it by blank page.
 		 */
 		if (IsPageCreatedByLoader((Page) page))
 		{
@@ -1140,5 +1140,5 @@ PGSharedMemoryIsInUse(unsigned long id1, unsigned long id2)
 }
 
 #else	/* WIN32 */
-#include "pg_bulkload_win32.c"
+#include "pg_fastload_win32.c"
 #endif

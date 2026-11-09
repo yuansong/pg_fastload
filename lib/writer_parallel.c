@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/writer_parallel.c
+ * pg_fastload: lib/writer_parallel.c
  *
  *	  Copyright (c) 2009-2026, NTT, Inc.
  */
@@ -176,7 +176,7 @@ ParallelWriterInit(ParallelWriter *self)
 		self->writer->dup_badfile = self->base.dup_badfile;
 
 	/*
-	 * The following executes pg_bulkload() in the new process with a
+	 * The following executes pg_fastload() in the new process with a
 	 * DirectWriter writer; see DirectWriterSendQuery() for more details.
 	 */
 	if (1 != self->writer->sendQuery(self->writer, self->conn, queueName,

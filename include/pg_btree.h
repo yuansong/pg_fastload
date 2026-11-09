@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: include/pg_btree.h
+ * pg_fastload: include/pg_btree.h
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */

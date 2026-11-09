@@ -8,7 +8,7 @@
 <head>
 	<link rel="icon" type="image/png" href="https://wiki.postgresql.org/images/3/30/PostgreSQL_logo.3colors.120x120.png" />
 	<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-	<title>pg_bulkload: プロジェクト ホームページ</title>
+	<title>pg_fastload: プロジェクト ホームページ</title>
 	<link rel="stylesheet" TYPE="text/css"href="style.css">
 </head>
 
@@ -17,11 +17,11 @@
 <center>
 <img style="border: none; margin-left: auto; margin-right: auto; " src="https://wiki.postgresql.org/images/3/30/PostgreSQL_logo.3colors.120x120.png" height="75" width="75" />
 <hr />
-<h1>pg_bulkload ホームページへようこそ</h1>
+<h1>pg_fastload ホームページへようこそ</h1>
 </center>
 
 <p>
-pg_bulkload は PostgreSQL 向けの高速データロードユーティリティです。
+pg_fastload は PostgreSQL 向けの高速データロードユーティリティです。
 </p>
 <p>
 <a href="index.html">Here is an English page.</a>
@@ -32,7 +32,7 @@ pg_bulkload は PostgreSQL 向けの高速データロードユーティリテ�
 <h1 id="documentation">ドキュメント</h1>
 <ul>
 <li>
-<a href="pg_bulkload-ja.html">高速データローダ: <strong>pg_bulkload</strong> ドキュメント</a>
+<a href="pg_fastload-ja.html">高速データローダ: <strong>pg_fastload</strong> ドキュメント</a>
   <ul>
     <li>一定の制約条件の下で大量のデータを高速にロードするためのプログラムです。</li>
   </ul>
@@ -50,7 +50,7 @@ pg_bulkload は PostgreSQL 向けの高速データロードユーティリテ�
 <h1 id="performance">性能測定結果</h1>
 
 <p>
-COPY と pg_bulkload の比較のため、以下の条件で測定を行いました。
+COPY と pg_fastload の比較のため、以下の条件で測定を行いました。
 PostgreSQL サーバは、基本的なチューニングを済ませた状態です。
 詳細な環境条件については末尾に記載しています。
 </p>
@@ -80,9 +80,9 @@ PostgreSQL サーバは、基本的なチューニングを済ませた状態で
 
 <h2>結果1 : 初期ロード</h2>
 <p>
-pg_bulkload の PARALLEL モードを用いることで、COPY に比べて半分程度の時間でロードを行うことができています。
+pg_fastload の PARALLEL モードを用いることで、COPY に比べて半分程度の時間でロードを行うことができています。
 COPY を用いる場合でも、インデックス定義なしで COPY することで処理時間を 2/3 程度にまで短縮することが可能です。
-これは pg_bulkload の DIRECT モードとほぼ同等の効果があります。
+これは pg_fastload の DIRECT モードとほぼ同等の効果があります。
 </p>
 <table style="float:left">
 <caption>初期ロード(4GB) </caption>
@@ -105,12 +105,12 @@ COPY を用いる場合でも、インデックス定義なしで COPY するこ
     <td align="right">66.7 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (DIRECT)<br>with indexes</td>
+    <td>pg_fastload (DIRECT)<br>with indexes</td>
     <td align="right">334 sec</td>
     <td align="right">66.8 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (PARALLEL)<br>with indexes</td>
+    <td>pg_fastload (PARALLEL)<br>with indexes</td>
     <td align="right">221 sec</td>
     <td align="right">44.2 %</td>
   </tr>
@@ -123,7 +123,7 @@ COPY を用いる場合でも、インデックス定義なしで COPY するこ
 
 <h2 style="clear:both">結果2 : 追加ロード</h2>
 <p>
-pg_bulkload を用いることで、インデックスを付けたままのロードでも、COPY と比較して DIRECT モードで 2/3 程度、PARALLEL モードで半分程度の時間での実施が可能です。
+pg_fastload を用いることで、インデックスを付けたままのロードでも、COPY と比較して DIRECT モードで 2/3 程度、PARALLEL モードで半分程度の時間での実施が可能です。
 追加ロードの COPY では、インデックスを落としてロードを行う手段は有効ではありません。
 インデックスの再作成の際に既存のデータもインデックスしなければならないためです。
 </p>
@@ -149,12 +149,12 @@ pg_bulkload を用いることで、インデックスを付けたままのロ�
     <td align="right">133.6 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (DIRECT)<br>with indexes</td>
+    <td>pg_fastload (DIRECT)<br>with indexes</td>
     <td align="right">93 sec</td>
     <td align="right">66.4 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (PARALLEL)<br>with indexes</td>
+    <td>pg_fastload (PARALLEL)<br>with indexes</td>
     <td align="right">70 sec</td>
     <td align="right">50.0 %</td>
   </tr>
@@ -167,13 +167,13 @@ pg_bulkload を用いることで、インデックスを付けたままのロ�
 
 <h2 style="clear:both">結果3 : パラメータ、各種機能による性能影響</h2>
 <p>
-pg_bulkload は インデックス作成処理において maintenance_work_mem の影響を受けます。
+pg_fastload は インデックス作成処理において maintenance_work_mem の影響を受けます。
 この値を大きくすることでさらにロードが高速になる可能性があります。
 ここでは、maintenance_work_mem が 64 MB と 1 GB の場合で 15 % 程度処理時間に差が出ています。
 </p>
 
 <p>
-pg_bulkload の FILTER 機能を用いることで、入力データを柔軟に編集しながらロードすることができますが、性能へのトレードオフがあります。
+pg_fastload の FILTER 機能を用いることで、入力データを柔軟に編集しながらロードすることができますが、性能へのトレードオフがあります。
 この検証では、SQL関数を利用する場合には2倍以上、C言語関数を利用する場合には 1.3倍強 までロード時間が増加しました。
 </p>
 
@@ -233,7 +233,7 @@ pg_bulkload の FILTER 機能を用いることで、入力データを柔軟に
   <tr><td>Disks</td><td>SAS 10000rpm 2TB * 4</td></tr>
   <tr><td>OS</td><td>CentOS 6.2 (64bit)</td></tr>
   <tr><td>PostgreSQL version</td><td>9.3.4</td></tr>
-  <tr><td>pg_bulkload version</td><td>3.1.6</td></tr>
+  <tr><td>pg_fastload version</td><td>3.1.6</td></tr>
   <tr><td>shared_buffers</td><td>3210MB</td></tr>
   <tr><td>checkpoint_segments</td><td>300</td></tr>
   <tr><td>checkpoint_timeout</td><td>15min</td></tr>

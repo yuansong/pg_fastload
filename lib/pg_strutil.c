@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/pg_strutil.c
+ * pg_fastload: lib/pg_strutil.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */

@@ -122,12 +122,12 @@
     <LibraryPath Condition="'$(Configuration)|$(Platform)'=='8.4|x64'">C:\Program Files %28x86%29\PostgreSQL\8.4\lib;$(LibraryPath)</LibraryPath>
     <LibraryPath Condition="'$(Configuration)|$(Platform)'=='8.3|Win32'">C:\Program Files %28x86%29\PostgreSQL\8.3\lib;$(LibraryPath)</LibraryPath>
     <LibraryPath Condition="'$(Configuration)|$(Platform)'=='8.3|x64'">C:\Program Files %28x86%29\PostgreSQL\8.4\lib;$(LibraryPath)</LibraryPath>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|Win32'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|x64'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|Win32'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|x64'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|Win32'">pg_bulkload</TargetName>
-    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|x64'">pg_bulkload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|Win32'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='9.0|x64'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|Win32'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.4|x64'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|Win32'">pg_fastload</TargetName>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='8.3|x64'">pg_fastload</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='9.0|Win32'">
     <ClCompile>
@@ -307,7 +307,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\bin\pg_bulkload.c" />
+    <ClCompile Include="..\bin\pg_fastload.c" />
     <ClCompile Include="..\bin\pgut\pgut-fe.c" />
     <ClCompile Include="..\bin\pgut\pgut-list.c" />
     <ClCompile Include="..\bin\pgut\pgut.c" />
@@ -372,8 +372,8 @@
     <None Include="..\bin\data\gettime.awk" />
     <None Include="..\doc\index.html" />
     <None Include="..\doc\index_ja.html" />
-    <None Include="..\doc\pg_bulkload-ja.html" />
-    <None Include="..\doc\pg_bulkload.html" />
+    <None Include="..\doc\pg_fastload-ja.html" />
+    <None Include="..\doc\pg_fastload.html" />
     <None Include="..\doc\pg_timestamp-ja.html" />
     <None Include="..\doc\pg_timestamp.html" />
     <None Include="..\doc\sample_bin.ctl" />

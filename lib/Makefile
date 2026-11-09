@@ -1,17 +1,19 @@
 #
-# pg_bulkload: lib/Makefile
+# pg_fastload: lib/Makefile
 #
 #    Copyright (c) 2007-2026, NTT, Inc.
 #
 SRCS = \
 	binary.c \
+	fastload_parallel.c \
+	fastload_worker.c \
 	logger.c \
 	parser_binary.c \
 	parser_csv.c \
 	parser_function.c \
 	parser_tuple.c \
 	pg_btree.c \
-	pg_bulkload.c \
+	pg_fastload.c \
 	pg_strutil.c \
 	reader.c \
 	source.c \
@@ -23,16 +25,16 @@ SRCS = \
 	pgut/pgut-be.c \
 	pgut/pgut-ipc.c
 OBJS = $(SRCS:.c=.o)
-MODULE_big = pg_bulkload
+MODULE_big = pg_fastload
 
-EXTENSION = pg_bulkload
+EXTENSION = pg_fastload
 
-# set pg_bulkload version
-BULKLOAD_VERSION = $(shell grep "PG_BULKLOAD_VERSION" ../include/common.h | cut -d " " -f 3 | tr -d '"')
+# set pg_fastload version
+FASTLOAD_VERSION = $(shell grep "PG_FASTLOAD_VERSION" ../include/common.h | cut -d " " -f 3 | tr -d '"')
 
 #supports EXTENSION (for >=9.1)
-DATA_built = pg_bulkload--$(BULKLOAD_VERSION).sql \
-	pg_bulkload.control
+DATA_built = pg_fastload--$(FASTLOAD_VERSION).sql \
+	pg_fastload.control
 
 PG_CPPFLAGS = -I../include -I$(libpq_srcdir)
 SHLIB_LINK = $(libpq) -lpthread
@@ -42,7 +44,7 @@ SHLIB_LINK = $(libpq) -lpthread
 SHLIB_EXPORTS = exports.txt
 
 ifdef USE_PROFILE
-PG_CPPFLAGS += -DENABLE_BULKLOAD_PROFILE
+PG_CPPFLAGS += -DENABLE_FASTLOAD_PROFILE
 endif
 
 ifndef USE_PGXS
@@ -75,9 +77,9 @@ subclean:
 
 LDFLAGS+=-Wl,--build-id
 
-pg_bulkload--$(BULKLOAD_VERSION).sql: pg_bulkload.sql.in
+pg_fastload--$(FASTLOAD_VERSION).sql: pg_fastload.sql.in
 	sed 's,MODULE_PATHNAME,$$libdir/$(MODULE_big),g' $< \
-	| sed 's,BULKLOAD_VERSION,$(BULKLOAD_VERSION),g' > $@
+	| sed 's,FASTLOAD_VERSION,$(FASTLOAD_VERSION),g' > $@
 
-pg_bulkload.control: pg_bulkload.control.in
-	sed 's,BULKLOAD_VERSION,$(BULKLOAD_VERSION),g' $< > $@
+pg_fastload.control: pg_fastload.control.in
+	sed 's,FASTLOAD_VERSION,$(FASTLOAD_VERSION),g' $< > $@

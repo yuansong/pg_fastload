@@ -74,7 +74,7 @@ extern int no_such_variable
 #define ItemIdIsDead(itemId)		ItemIdDeleted(itemId)
 #define GetCurrentCommandId(used)	GetCurrentCommandId()
 #define stringToQualifiedNameList(str) \
-	stringToQualifiedNameList((str), "pg_bulkload")
+	stringToQualifiedNameList((str), "pg_fastload")
 #define PageAddItem(page, item, size, offnum, overwrite, is_heap) \
 	PageAddItem((page), (item), (size), (offnum), LP_USED)
 

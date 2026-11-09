@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/reader.c
+ * pg_fastload: lib/reader.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
@@ -8,10 +8,11 @@
  * @file
  * @brief Implementation of reader module
  */
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "access/heapam.h"
 #include "catalog/pg_proc.h"
@@ -65,6 +66,7 @@ ReaderCreate(char *type)
 	};
 
 	Reader	   *self;
+	size_t		idx;
 
 	/* default of type is CSV */
 	if (type == NULL)
@@ -75,7 +77,12 @@ ReaderCreate(char *type)
 	self->limit = INT64_MAX;
 	self->checker.encoding = -1;
 
-	self->parser = values[choice("TYPE", type, keys, lengthof(keys))]();
+	idx = choice("TYPE", type, keys, lengthof(keys));
+	self->parser = values[idx]();
+
+	/* TYPE=CSV and TYPE=BINARY/FIXED (fixed-length) are parallelized */
+	self->is_csv = (idx == 2);
+	self->is_fixed = (idx == 0 || idx == 1);
 
 	return self;
 }
@@ -88,6 +95,25 @@ ReaderInit(Reader *self)
 	 */
 	if (self->max_parse_errors < -1)
 		self->max_parse_errors = DEFAULT_MAX_PARSE_ERRORS;
+
+	/*
+	 * PARALLEL_WORKERS defaults to "online CPUs - 1": the leader backend
+	 * performing WriterInsert() occupies one CPU on its own.
+	 */
+	if (self->parallel && self->parallel_workers <= 0)
+	{
+		long	n = sysconf(_SC_NPROCESSORS_ONLN);
+		int		w;
+
+		if (n < 1)
+			n = 1;
+		w = (int) n - 1;
+		if (w < 1)
+			w = 1;
+		if (w > 64)
+			w = 64;
+		self->parallel_workers = w;
+	}
 
 	/*
 	 * Use the client_encoding case of ENCODING is not specified and INPUT is
@@ -120,6 +146,27 @@ choice(const char *name, const char *key, const char *keys[], size_t nkeys)
 bool
 ReaderParam(Reader *rd, const char *keyword, char *target)
 {
+	/*
+	 * Mirror CSV/parallel settings for the parallel worker protocol.
+	 * These keywords are STILL forwarded to ParserParam() below, so the
+	 * original single-process behavior is completely unchanged.
+	 */
+	if (CompareKeyword(keyword, "SKIP") ||
+		CompareKeyword(keyword, "OFFSET"))
+		rd->parallel_skip = ParseInt64(target, 0);
+	else if (CompareKeyword(keyword, "DELIMITER"))
+		rd->parallel_delim = ParseSingleChar(target);
+	else if (CompareKeyword(keyword, "QUOTE"))
+		rd->parallel_quote = ParseSingleChar(target);
+	else if (CompareKeyword(keyword, "ESCAPE"))
+		rd->parallel_escape = ParseSingleChar(target);
+	else if (CompareKeyword(keyword, "NULL"))
+		rd->parallel_null = pstrdup(target);
+	else if (CompareKeyword(keyword, "FILTER"))
+		rd->parallel_has_filter = true;
+	else if (CompareKeyword(keyword, "FORCE_NOT_NULL"))
+		rd->parallel_has_fnn = true;
+
 	/*
 	 * result
 	 */
@@ -169,6 +216,21 @@ ReaderParam(Reader *rd, const char *keyword, char *target)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("invalid encoding for parameter \"ENCODING\": \"%s\"",
 						target)));
+	}
+	else if (CompareKeyword(keyword, "PARALLEL"))
+	{
+		rd->parallel = ParseBoolean(target);
+	}
+	else if (CompareKeyword(keyword, "PARALLEL_WORKERS") ||
+			 CompareKeyword(keyword, "PARSE_WORKERS"))
+	{
+		int64	n = ParseInt64(target, 0);
+
+		if (n < 1 || n > 64)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("PARALLEL_WORKERS must be between 1 and 64")));
+		rd->parallel_workers = (int) n;
 	}
 	else if (rd->parser == NULL ||
 			!ParserParam(rd->parser, keyword, target))
@@ -319,7 +381,7 @@ ReaderNext(Reader *rd)
 
 	} while (!eof && !tuple);
 
-	BULKLOAD_PROFILE(&prof_reader_parser);
+	FASTLOAD_PROFILE(&prof_reader_parser);
 	return tuple;
 }
 
@@ -474,7 +536,7 @@ CheckerInit(Checker *checker, Relation rel, TupleChecker *tchecker)
 		ExecCheckPermissions(range_table, perminfos, true);
 #elif PG_VERSION_NUM >= 90100
         /* This API is published only from 9.1. 
-         * This is used for permission check, but currently pg_bulkload
+         * This is used for permission check, but currently pg_fastload
          * is called only from super user and so the below code maybe
          * is not essential. */
         ExecCheckRTPerms(range_table, true);

@@ -3,7 +3,8 @@ FROM rockylinux/rockylinux:${RHEL_VERSION:-10}
 
 ARG RHEL_VERSION
 ARG PG_VERSION
-ARG PG_BULKLOAD_VERSION
+ARG PG_FASTLOAD_VERSION
+ARG REPO_URL
 
 ENV PATH=/usr/pgsql-${PG_VERSION}/bin:$PATH
 ENV PGDATA=/var/lib/pgsql/${PG_VERSION}/data
@@ -51,16 +52,16 @@ WORKDIR /var/lib/pgsql/
 
 # Deploy the files required for the build
 RUN rpmdev-setuptree
-RUN git clone https://github.com/ossc-db/pg_bulkload.git
-RUN cp -a pg_bulkload/SPECS/pg_bulkload-pg${PG_VERSION}.spec rpmbuild/SPECS
-RUN cd pg_bulkload && \
-    git archive VERSION${PG_BULKLOAD_VERSION//./_} \
+RUN git clone ${REPO_URL}
+RUN cp -a pg_fastload/SPECS/pg_fastload-pg${PG_VERSION}.spec rpmbuild/SPECS
+RUN cd pg_fastload && \
+    git archive VERSION${PG_FASTLOAD_VERSION//./_} \
         --format=tar.gz \
-        --prefix=pg_bulkload-${PG_BULKLOAD_VERSION}/ \
-        --output=../rpmbuild/SOURCES/pg_bulkload-${PG_BULKLOAD_VERSION}.tar.gz
+        --prefix=pg_fastload-${PG_FASTLOAD_VERSION}/ \
+        --output=../rpmbuild/SOURCES/pg_fastload-${PG_FASTLOAD_VERSION}.tar.gz
 
 # Build RPMs
-RUN QA_RPATHS=0x0002 rpmbuild rpmbuild/SPECS/pg_bulkload-pg${PG_VERSION}.spec \
+RUN QA_RPATHS=0x0002 rpmbuild rpmbuild/SPECS/pg_fastload-pg${PG_VERSION}.spec \
         -bb --define="dist .pg${PG_VERSION}.rhel${RHEL_VERSION}"
 
 
@@ -76,4 +77,4 @@ RUN rpm -ivh /var/lib/pgsql/rpmbuild/RPMS/x86_64/*
 USER postgres
 RUN initdb --no-locale -E UTF8  && \
     pg_ctl -w start && \
-    make -C pg_bulkload installcheck
+    make -C pg_fastload installcheck

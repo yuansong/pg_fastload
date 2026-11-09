@@ -1,6 +1,6 @@
 \connect contrib_regression_sqlascii
 SET client_encoding = 'SQL_ASCII';
-\! pg_bulkload -d contrib_regression_sqlascii data/csv7.ctl -i data/data4.csv -l results/encoding1.log -P results/encoding1.prs -u results/encoding1.dup -o "PARSE_ERRORS=-1"
+\! pg_fastload -d contrib_regression_sqlascii data/csv7.ctl -i data/data4.csv -l results/encoding1.log -P results/encoding1.prs -u results/encoding1.dup -o "PARSE_ERRORS=-1"
 NOTICE: BULK LOAD START
 NOTICE: BULK LOAD END
 	0 Rows skipped.
@@ -10,7 +10,7 @@ NOTICE: BULK LOAD END
 	0 Rows replaced with new rows.
 \! awk -f data/adjust.awk results/encoding1.log
 
-pg_bulkload <VERSION> on <TIMESTAMP>
+pg_fastload <VERSION> on <TIMESTAMP>
 
 INPUT = .../data4.csv
 PARSE_BADFILE = .../encoding1.prs
@@ -78,7 +78,7 @@ SELECT id, encode(str::bytea, 'hex'), master FROM target ORDER BY id;
   3 | a4a220 |      3
 (9 rows)
 
-\! pg_bulkload -d contrib_regression_sqlascii data/csv7.ctl -i data/data4.csv -l results/encoding2.log -P results/encoding2.prs -u results/encoding2.dup -o "PARSE_ERRORS=-1" -o "ENCODING=UTF8"
+\! pg_fastload -d contrib_regression_sqlascii data/csv7.ctl -i data/data4.csv -l results/encoding2.log -P results/encoding2.prs -u results/encoding2.dup -o "PARSE_ERRORS=-1" -o "ENCODING=UTF8"
 NOTICE: BULK LOAD START
 NOTICE: BULK LOAD END
 	0 Rows skipped.
@@ -89,7 +89,7 @@ NOTICE: BULK LOAD END
 WARNING: some rows were not loaded due to errors.
 \! awk -f data/adjust.awk results/encoding2.log
 
-pg_bulkload <VERSION> on <TIMESTAMP>
+pg_fastload <VERSION> on <TIMESTAMP>
 
 INPUT = .../data4.csv
 PARSE_BADFILE = .../encoding2.prs
@@ -155,7 +155,7 @@ SELECT id, encode(str::bytea, 'hex'), master FROM target ORDER BY id;
   2 | e38182 |      2
 (6 rows)
 
-\! pg_bulkload -d contrib_regression_sqlascii data/csv7.ctl -i data/data4.csv -l results/encoding3.log -P results/encoding3.prs -u results/encoding3.dup -o "PARSE_ERRORS=0" -o "ENCODING=UTF8"
+\! pg_fastload -d contrib_regression_sqlascii data/csv7.ctl -i data/data4.csv -l results/encoding3.log -P results/encoding3.prs -u results/encoding3.dup -o "PARSE_ERRORS=0" -o "ENCODING=UTF8"
 NOTICE: BULK LOAD START
 NOTICE: BULK LOAD END
 	0 Rows skipped.
@@ -166,7 +166,7 @@ NOTICE: BULK LOAD END
 WARNING: some rows were not loaded due to errors.
 \! awk -f data/adjust.awk results/encoding3.log
 
-pg_bulkload <VERSION> on <TIMESTAMP>
+pg_fastload <VERSION> on <TIMESTAMP>
 
 INPUT = .../data4.csv
 PARSE_BADFILE = .../encoding3.prs
@@ -225,7 +225,7 @@ SELECT id, encode(str::bytea, 'hex'), master FROM target ORDER BY id;
 
 \connect contrib_regression_utf8
 SET client_encoding = 'SQL_ASCII';
-\! pg_bulkload -d contrib_regression_utf8 data/csv7.ctl -i data/data4.csv -l results/encoding4.log -P results/encoding4.prs -u results/encoding4.dup -o "PARSE_ERRORS=1" -o "ENCODING=SQL_ASCII"
+\! pg_fastload -d contrib_regression_utf8 data/csv7.ctl -i data/data4.csv -l results/encoding4.log -P results/encoding4.prs -u results/encoding4.dup -o "PARSE_ERRORS=1" -o "ENCODING=SQL_ASCII"
 NOTICE: BULK LOAD START
 NOTICE: BULK LOAD END
 	0 Rows skipped.
@@ -236,7 +236,7 @@ NOTICE: BULK LOAD END
 WARNING: some rows were not loaded due to errors.
 \! awk -f data/adjust.awk results/encoding4.log
 
-pg_bulkload <VERSION> on <TIMESTAMP>
+pg_fastload <VERSION> on <TIMESTAMP>
 
 INPUT = .../data4.csv
 PARSE_BADFILE = .../encoding4.prs
@@ -298,7 +298,7 @@ SELECT id, encode(str::bytea, 'hex'), master FROM target ORDER BY id;
   2 | e38182 |      2
 (4 rows)
 
-\! pg_bulkload -d contrib_regression_utf8 data/csv7.ctl -i data/data4.csv -l results/encoding5.log -P results/encoding5.prs -u results/encoding5.dup -o "PARSE_ERRORS=2" -o "ENCODING=UTF8"
+\! pg_fastload -d contrib_regression_utf8 data/csv7.ctl -i data/data4.csv -l results/encoding5.log -P results/encoding5.prs -u results/encoding5.dup -o "PARSE_ERRORS=2" -o "ENCODING=UTF8"
 NOTICE: BULK LOAD START
 NOTICE: BULK LOAD END
 	0 Rows skipped.
@@ -309,7 +309,7 @@ NOTICE: BULK LOAD END
 WARNING: some rows were not loaded due to errors.
 \! awk -f data/adjust.awk results/encoding5.log
 
-pg_bulkload <VERSION> on <TIMESTAMP>
+pg_fastload <VERSION> on <TIMESTAMP>
 
 INPUT = .../data4.csv
 PARSE_BADFILE = .../encoding5.prs
@@ -376,7 +376,7 @@ SELECT id, encode(str::bytea, 'hex'), master FROM target ORDER BY id;
   2 | e38182 |      2
 (6 rows)
 
-\! pg_bulkload -d contrib_regression_utf8 data/csv7.ctl -i data/data4.csv -l results/encoding6.log -P results/encoding6.prs -u results/encoding6.dup -o "PARSE_ERRORS=3" -o "ENCODING=EUC-JP"
+\! pg_fastload -d contrib_regression_utf8 data/csv7.ctl -i data/data4.csv -l results/encoding6.log -P results/encoding6.prs -u results/encoding6.dup -o "PARSE_ERRORS=3" -o "ENCODING=EUC-JP"
 NOTICE: BULK LOAD START
 NOTICE: BULK LOAD END
 	0 Rows skipped.
@@ -387,7 +387,7 @@ NOTICE: BULK LOAD END
 WARNING: some rows were not loaded due to errors.
 \! awk -f data/adjust.awk results/encoding6.log
 
-pg_bulkload <VERSION> on <TIMESTAMP>
+pg_fastload <VERSION> on <TIMESTAMP>
 
 INPUT = .../data4.csv
 PARSE_BADFILE = .../encoding6.prs

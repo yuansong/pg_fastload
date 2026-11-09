@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: util/pg_timestamp.c
+ * pg_fastload: util/pg_timestamp.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */

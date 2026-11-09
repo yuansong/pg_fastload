@@ -1,0 +1,5 @@
+# pg_fastload extension
+comment = 'pg_fastload is a high speed data loading utility for PostgreSQL'
+default_version = 'FASTLOAD_VERSION'
+module_pathname = '$libdir/pg_fastload'
+relocatable = false

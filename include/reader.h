@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: include/reader.h
+ * pg_fastload: include/reader.h
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
@@ -11,7 +11,7 @@
 #ifndef READER_H_INCLUDED
 #define READER_H_INCLUDED
 
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include "access/xact.h"
 #include "lib/stringinfo.h"
@@ -177,6 +177,27 @@ struct Reader
 	 */
 	int64			parse_errors;	/**< number of parse errors ignored */
 	FILE		   *parse_fp;
+
+	/*
+	 * Parallel CSV loading (pg_fastload).
+	 *
+	 * PARALLEL=ON switches TYPE=CSV to a multi-process path.  The keywords
+	 * below are mirrored here because the parallel workers need them without
+	 * touching the single-process CSVParser; they are still forwarded to
+	 * ParserParam() so the original behavior is preserved.
+	 */
+	bool			parallel;			/**< PARALLEL = ON */
+	int				parallel_workers;	/**< PARALLEL_WORKERS, <=0 => auto */
+	bool			is_csv;				/**< TYPE resolved to CSV */
+	bool			is_fixed;			/**< TYPE resolved to BINARY / FIXED
+										 (both use the fixed-length parser) */
+	int64			parallel_skip;		/**< SKIP / OFFSET */
+	char			parallel_delim;
+	char			parallel_quote;
+	char			parallel_escape;
+	char		   *parallel_null;		/**< NULL marker string */
+	bool			parallel_has_filter;
+	bool			parallel_has_fnn;
 };
 
 extern Reader *ReaderCreate(char *type);

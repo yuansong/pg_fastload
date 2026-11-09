@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/writer.c
+ * pg_fastload: lib/writer.c
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
  */
@@ -8,7 +8,7 @@
  * @file
  * @brief Implementation of writer module
  */
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"

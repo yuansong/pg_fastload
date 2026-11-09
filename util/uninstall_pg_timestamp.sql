@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: util/uninstall_pg_timestamp.sql
+ * pg_fastload: util/uninstall_pg_timestamp.sql
  *
  *    Copyright (c) 2007-2026, NTT, Inc.
  */

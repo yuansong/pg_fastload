@@ -131,7 +131,7 @@
 				>
 			</File>
 			<File
-				RelativePath="..\lib\pg_bulkload.c"
+				RelativePath="..\lib\pg_fastload.c"
 				>
 			</File>
 			<File
@@ -181,7 +181,7 @@
 				>
 			</File>
 			<File
-				RelativePath="..\include\pg_bulkload.h"
+				RelativePath="..\include\pg_fastload.h"
 				>
 			</File>
 			<File
@@ -214,11 +214,11 @@
 			</File>
 		</Filter>
 		<File
-			RelativePath="..\lib\pg_bulkload.sql.in"
+			RelativePath="..\lib\pg_fastload.sql.in"
 			>
 		</File>
 		<File
-			RelativePath="..\lib\uninstall_pg_bulkload.sql"
+			RelativePath="..\lib\uninstall_pg_fastload.sql"
 			>
 		</File>
 	</Files>

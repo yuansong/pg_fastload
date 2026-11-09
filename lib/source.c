@@ -1,10 +1,10 @@
 /*
- * pg_bulkload: lib/source.c
+ * pg_fastload: lib/source.c
  *
  *	  Copyright (c) 2009-2026, NTT, Inc.
  */
 
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include <fcntl.h>
 #include "pgut/pgut-pthread.h"
@@ -698,7 +698,7 @@ RemoteSourceClose(RemoteSource *self)
 		{"duration", FLOAT8OID, 8, -1}
 	};
 
-	SendResultDescriptionMessage(attrs, PG_BULKLOAD_COLS);
+	SendResultDescriptionMessage(attrs, PG_FASTLOAD_COLS);
 	pfree(self);
 }
 

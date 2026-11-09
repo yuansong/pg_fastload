@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: include/writer.h
+ * pg_fastload: include/writer.h
  *
  *	  Copyright (c) 2009-2026, NTT, Inc.
  */
@@ -12,7 +12,7 @@
 #ifndef WRITER_H_INCLUDED
 #define WRITER_H_INCLUDED
 
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include "libpq-fe.h"
 

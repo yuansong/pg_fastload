@@ -26,7 +26,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\bin\pg_bulkload.c">
+    <ClCompile Include="..\bin\pg_fastload.c">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\bin\pgut\pgut-fe.c">
@@ -213,10 +213,10 @@
     <None Include="..\doc\index_ja.html">
       <Filter>doc</Filter>
     </None>
-    <None Include="..\doc\pg_bulkload-ja.html">
+    <None Include="..\doc\pg_fastload-ja.html">
       <Filter>doc</Filter>
     </None>
-    <None Include="..\doc\pg_bulkload.html">
+    <None Include="..\doc\pg_fastload.html">
       <Filter>doc</Filter>
     </None>
     <None Include="..\doc\pg_timestamp-ja.html">

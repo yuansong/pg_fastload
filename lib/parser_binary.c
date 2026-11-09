@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/parser_binary.c
+ * pg_fastload: lib/parser_binary.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
@@ -8,7 +8,7 @@
  * @file
  * @brief Implementation of fixed file processing module
  */
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include "access/heapam.h"
 #include "access/htup.h"
@@ -63,6 +63,22 @@ static void BinaryParserDumpParams(BinaryParser *self);
 static void BinaryParserDumpRecord(BinaryParser *self, FILE *fp, char *badfile);
 
 static void ExtractValuesFromFixed(BinaryParser *self, char *record);
+
+/*
+ * Export the parsed COL field descriptors + effective STRIDE to the
+ * parallel-path leader (lib/fastload_parallel.c).  BinaryParserInit() has
+ * already run when the parallel decision is made, so rec_len includes the
+ * STRIDE default (max field extent) resolved there.
+ */
+void
+BinaryParserGetMeta(Parser *self, int *nfield, size_t *rec_len, Field **fields)
+{
+	BinaryParser *bself = (BinaryParser *) self;
+
+	*nfield = bself->nfield;
+	*rec_len = bself->rec_len;
+	*fields = bself->fields;
+}
 
 /**
  * @brief Create a new Binary parser.
@@ -247,7 +263,7 @@ BinaryParserRead(BinaryParser *self, Checker *checker)
 		int		len;
 		div_t	v;
 
-		BULKLOAD_PROFILE(&prof_reader_parser);
+		FASTLOAD_PROFILE(&prof_reader_parser);
 		while ((len = SourceRead(self->source, self->buffer,
 						self->rec_len * READ_LINE_NUM)) < 0)
 		{
@@ -255,7 +271,7 @@ BinaryParserRead(BinaryParser *self, Checker *checker)
 				ereport(ERROR, (errcode_for_file_access(),
 								errmsg("could not read input file: %m")));
 		}
-		BULKLOAD_PROFILE(&prof_reader_source);
+		FASTLOAD_PROFILE(&prof_reader_source);
 
 		/*
 		 * Calculate the actual number of rows. Trailing remainder bytes

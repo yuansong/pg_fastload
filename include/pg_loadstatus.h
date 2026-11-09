@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: include/pg_loadstatus.h
+ * pg_fastload: include/pg_loadstatus.h
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
@@ -23,20 +23,20 @@
 #define MAXPGPATH		1024
 #endif
 
-#define BULKLOAD_LSF_DIR		"pg_bulkload"
+#define FASTLOAD_LSF_DIR		"pg_fastload"
 
 /* typical sector size is 512 byte */
-#define BULKLOAD_LSF_BLCKSZ		512
+#define FASTLOAD_LSF_BLCKSZ		512
 
 #if PG_VERSION_NUM >= 160000
-#define BULKLOAD_LSF_PATH(buffer, ls) \
+#define FASTLOAD_LSF_PATH(buffer, ls) \
 	snprintf((buffer), MAXPGPATH, \
-			 BULKLOAD_LSF_DIR "/%d.%d.loadstatus", \
+			 FASTLOAD_LSF_DIR "/%d.%d.loadstatus", \
 			 (ls)->ls.rLocator.dbOid, (ls)->ls.relid)
 #else
-#define BULKLOAD_LSF_PATH(buffer, ls) \
+#define FASTLOAD_LSF_PATH(buffer, ls) \
 	snprintf((buffer), MAXPGPATH, \
-			 BULKLOAD_LSF_DIR "/%d.%d.loadstatus", \
+			 FASTLOAD_LSF_DIR "/%d.%d.loadstatus", \
 			 (ls)->ls.rnode.dbNode, (ls)->ls.relid)
 #endif
 /**
@@ -53,9 +53,9 @@ typedef union LoadStatus
 		RelFileNode	rnode;		/**< target relation node */
 #endif
 		BlockNumber exist_cnt;	/**< number of blocks already existing */
-		BlockNumber create_cnt;	/**< number of blocks pg_bulkload creates */
+		BlockNumber create_cnt;	/**< number of blocks pg_fastload creates */
 	} ls;
-	char	padding[BULKLOAD_LSF_BLCKSZ];
+	char	padding[FASTLOAD_LSF_BLCKSZ];
 } LoadStatus;
 
 #endif   /* LOADSTATUS_H */

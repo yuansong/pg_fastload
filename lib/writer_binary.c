@@ -1,10 +1,10 @@
 /*
- * pg_bulkload: lib/writer_binary.c
+ * pg_fastload: lib/writer_binary.c
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
  */
 
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -206,7 +206,7 @@ BinaryWriterInsert(BinaryWriter *self, HeapTuple tuple)
 		self->used_rec_cnt = 0;
 	}
 
-	BULKLOAD_PROFILE(&prof_writer_table);
+	FASTLOAD_PROFILE(&prof_writer_table);
 }
 
 /*
@@ -338,7 +338,7 @@ BinaryWriterParam(BinaryWriter *self, const char *keyword, char *value)
 		if (!superuser())
 			ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to use pg_bulkload to a file")));
+				 errmsg("must be superuser to use pg_fastload to a file")));
 
 		ASSERT_ONCE(self->base.output == NULL);
 		self->base.output = pstrdup(value);
@@ -388,7 +388,7 @@ BinaryWriterSendQuery(BinaryWriter *self, PGconn *conn, char *queueName, char *l
 
 	initStringInfo(&buf);
 	appendStringInfoString(&buf, 
-		"SELECT * FROM pgbulkload.pg_bulkload(ARRAY["
+		"SELECT * FROM pgfastload.pg_fastload(ARRAY["
 		"'TYPE=TUPLE',"
 		"'INPUT=' || $1,"
 		"'WRITER=BINARY',"

@@ -7,7 +7,7 @@
 <head>
 	<link rel="icon" type="image/png" href="https://wiki.postgresql.org/images/3/30/PostgreSQL_logo.3colors.120x120.png" />
 	<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-	<title>pg_bulkload: Project Home Page</title>
+	<title>pg_fastload: Project Home Page</title>
 	<link rel="stylesheet" TYPE="text/css"href="style.css">
 </head>
 
@@ -16,11 +16,11 @@
 
 <center><img style="border: none; margin-left: auto; margin-right: auto; " src="https://wiki.postgresql.org/images/3/30/PostgreSQL_logo.3colors.120x120.png" height="75" width="75" />
 <hr />
-<h1>Welcome to the pg_bulkload Project Home Page</h1>
+<h1>Welcome to the pg_fastload Project Home Page</h1>
 <hr />
 </center>
 <p>
-pg_bulkload is a high speed data loading utility for PostgreSQL.
+pg_fastload is a high speed data loading utility for PostgreSQL.
 </p>
 <p>
 <a href="index_ja.html">日本語ページはこちら</a>
@@ -31,9 +31,9 @@ pg_bulkload is a high speed data loading utility for PostgreSQL.
 <h1 id="documentation">Documentation</h1>
 <ul>
 <li>
-<a href="pg_bulkload.html">High speed data loader: <strong>pg_bulkload</strong> documentation</a>
+<a href="pg_fastload.html">High speed data loader: <strong>pg_fastload</strong> documentation</a>
   <ul>
-    <li>pg_bulkload provides high-speed data loading capability to PostgreSQL users.</li>
+    <li>pg_fastload provides high-speed data loading capability to PostgreSQL users.</li>
   </ul>
 </li>
 <li>
@@ -49,7 +49,7 @@ pg_bulkload is a high speed data loading utility for PostgreSQL.
 <h1 id="performance">Performance Results</h1>
 
 <p>
-Here is a comparison of the performance of PostgreSQL's COPY and pg_bulkload.
+Here is a comparison of the performance of PostgreSQL's COPY and pg_fastload.
 Performance was measured with basic-tuned PostgreSQL server.
 </p>
 
@@ -77,7 +77,7 @@ There are the following measurement patterns.
 
 <h2>Result 1: Initial data loading</h2>
 <p>
-Pg_bulkload on WRITER = PARALLEL mode can load data with an almost half time against COPY.
+Pg_fastload on WRITER = PARALLEL mode can load data with an almost half time against COPY.
 In PARALLEL mode, performance will be improved on multi-CPU server because reading an input file and writing rows to a table are done with two processes.
 </p>
 <p>
@@ -105,12 +105,12 @@ COPY also can be more fast by loading into table without indexes and create inde
     <td align="right">66.7 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (DIRECT)<br>with indexes</td>
+    <td>pg_fastload (DIRECT)<br>with indexes</td>
     <td align="right">334 sec</td>
     <td align="right">66.8 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (PARALLEL)<br>with indexes</td>
+    <td>pg_fastload (PARALLEL)<br>with indexes</td>
     <td align="right">221 sec</td>
     <td align="right">44.2 %</td>
   </tr>
@@ -123,7 +123,7 @@ COPY also can be more fast by loading into table without indexes and create inde
 
 <h2 style="clear:both">Result 2: Appended data loading</h2>
 <p>
-Pg_bulkload on WRITER = PARALLEL mode can load data with an almost half time against COPY in this case also.
+Pg_fastload on WRITER = PARALLEL mode can load data with an almost half time against COPY in this case also.
 COPY without indexes is not faster than COPY with indexes. Because it has to create indexes for total records of the table from initial.
 </p>
 
@@ -148,12 +148,12 @@ COPY without indexes is not faster than COPY with indexes. Because it has to cre
     <td align="right">133.6 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (DIRECT)<br>with indexes</td>
+    <td>pg_fastload (DIRECT)<br>with indexes</td>
     <td align="right">93 sec</td>
     <td align="right">66.4 %</td>
   </tr>
   <tr>
-    <td>pg_bulkload (PARALLEL)<br>with indexes</td>
+    <td>pg_fastload (PARALLEL)<br>with indexes</td>
     <td align="right">70 sec</td>
     <td align="right">50.0 %</td>
   </tr>
@@ -166,7 +166,7 @@ COPY without indexes is not faster than COPY with indexes. Because it has to cre
 
 <h2 style="clear:both">Result 3: Influence from parameters and features</h2>
 <p>
-The maintenece_work_mem, PostgreSQL parameter, affects the performance of pg_bulkload.
+The maintenece_work_mem, PostgreSQL parameter, affects the performance of pg_fastload.
 The duration becomes almost 15 % shorter if this parameter is changed from 64 MB to 1 GB.
 </p>
 
@@ -176,7 +176,7 @@ The actual measurement shows the loading time is increased to almost 240 % with 
 </p>
 
 <table style="float:left">
-<caption>pg_bulkload features</caption>
+<caption>pg_fastload features</caption>
 <thead>
   <tr>
     <th rowspan="2" colspan="2">項目</th>
@@ -231,7 +231,7 @@ The actual measurement shows the loading time is increased to almost 240 % with 
   <tr><td>Disks</td><td>SAS 10000rpm 2TB * 4</td></tr>
   <tr><td>OS</td><td>CentOS 6.2 (64bit)</td></tr>
   <tr><td>PostgreSQL version</td><td>9.3.4</td></tr>
-  <tr><td>pg_bulkload version</td><td>3.1.6</td></tr>
+  <tr><td>pg_fastload version</td><td>3.1.6</td></tr>
   <tr><td>shared_buffers</td><td>3210MB</td></tr>
   <tr><td>checkpoint_segments</td><td>300</td></tr>
   <tr><td>checkpoint_timeout</td><td>15min</td></tr>

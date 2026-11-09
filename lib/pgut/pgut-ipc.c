@@ -44,7 +44,7 @@ typedef HANDLE	ShmemHandle;
 
 static void win32_shmemName(char *name, size_t len, unsigned key)
 {
-	snprintf(name, len, "pg_bulkload_%u", key);
+	snprintf(name, len, "pg_fastload_%u", key);
 }
 #else
 typedef int		ShmemHandle;	/* shared memory ID returned by shmget(2) */

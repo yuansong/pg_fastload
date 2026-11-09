@@ -1,5 +1,5 @@
 #
-# pg_bulkload.so: lib/Makefile
+# pg_fastload.so: lib/Makefile
 #
 #    Copyright (c) 2007-2026, NTT, Inc.
 #

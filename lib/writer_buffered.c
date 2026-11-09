@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/writer_buffered.c
+ * pg_fastload: lib/writer_buffered.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
@@ -234,7 +234,7 @@ BufferedWriterSendQuery(BufferedWriter *self, PGconn *conn, char *queueName, cha
 	params[7] = (self->base.truncate ? "true" : "no");
 
 	return PQsendQueryParams(conn,
-		"SELECT * FROM pgbulkload.pg_bulkload(ARRAY["
+		"SELECT * FROM pgfastload.pg_fastload(ARRAY["
 		"'TYPE=TUPLE',"
 		"'INPUT=' || $1,"
 		"'WRITER=BUFFERED',"

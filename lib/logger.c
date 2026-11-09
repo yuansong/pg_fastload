@@ -1,10 +1,10 @@
 /*
- * pg_bulkload: lib/logger.c
+ * pg_fastload: lib/logger.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
  */
 
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include <sys/file.h>
 

@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/binary.c
+ * pg_fastload: lib/binary.c
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
  */
@@ -8,7 +8,7 @@
  * @file
  * @brief Implementation of binary file module
  */
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include "catalog/pg_type.h"
 #include "utils/builtins.h"
@@ -697,3 +697,138 @@ DefineRead(uint16)
 DefineRead(uint32)
 DefineRead(float4)
 DefineRead(float8)
+
+/* ------------------------------------------------------------------------
+ * Parallel (BINARY/FIXED) field-descriptor serialization
+ *
+ * The leader has already parsed the COL parameters into Field descriptors
+ * (including the STRIDE default resolved by BinaryParserInit).  These
+ * helpers move that information into the DSM parameter block as a compact
+ * wire format and rebuild worker-side Field arrays from it.  Function
+ * pointers are never shipped across processes -- workers re-resolve them
+ * from the static TYPES table via the kind index.
+ * ------------------------------------------------------------------------ */
+
+/* Wire format for one field: header + nulllen payload bytes. */
+typedef struct BinaryFieldWire
+{
+	int32		kind;		/**< index into the TYPES table */
+	int32		offset;
+	int32		len;
+	int32		nulllen;
+	/* followed by nulllen bytes of nullif pattern */
+} BinaryFieldWire;
+
+/* Growth factor for the Read_char work buffer (same as parser_binary.c). */
+#define BIN_STR_GROWTH	4
+
+static int
+BinaryFieldKind(const Field *field)
+{
+	int		i;
+
+	for (i = 0; i < lengthof(TYPES); i++)
+	{
+		if (TYPES[i].read == field->read)
+			return i;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("invalid field type for parallel mode")));
+	return 0;	/* keep compiler quiet */
+}
+
+Size
+BinarySerializedSize(const Field *fields, int nfield)
+{
+	Size	total = 0;
+	int		i;
+
+	for (i = 0; i < nfield; i++)
+	{
+		total += sizeof(BinaryFieldWire) + fields[i].nulllen;
+	}
+
+	return total;
+}
+
+Size
+BinarySerializeFields(const Field *fields, int nfield, char *dest)
+{
+	Size	total = 0;
+	int		i;
+
+	for (i = 0; i < nfield; i++)
+	{
+		BinaryFieldWire	w;
+		const Field    *f = &fields[i];
+
+		w.kind = (int32) BinaryFieldKind(f);
+		w.offset = (int32) f->offset;
+		w.len = (int32) f->len;
+		w.nulllen = (int32) f->nulllen;
+
+		memcpy(dest + total, &w, sizeof(w));
+		total += sizeof(w);
+		if (f->nulllen > 0)
+		{
+			memcpy(dest + total, f->nullif, f->nulllen);
+			total += f->nulllen;
+		}
+	}
+
+	return total;
+}
+
+void
+BinaryDeserializeFields(const char *src, int nfield, Field **out)
+{
+	Field	   *fields;
+	const char *p = src;
+	int			i;
+
+	fields = palloc0(sizeof(Field) * nfield);
+
+	for (i = 0; i < nfield; i++)
+	{
+		BinaryFieldWire	w;
+		Field		   *f = &fields[i];
+
+		memcpy(&w, p, sizeof(w));
+		p += sizeof(w);
+
+		if (w.kind < 0 || (size_t) w.kind >= lengthof(TYPES))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("pg_fastload worker: invalid COL field kind %d",
+							(int) w.kind)));
+
+		f->read = TYPES[w.kind].read;
+		f->write = TYPES[w.kind].write;
+		f->typeid = TYPES[w.kind].typeid;
+		f->offset = w.offset;
+		f->len = w.len;
+		f->character = (w.kind == T_CHAR || w.kind == T_VARCHAR);
+
+		f->nulllen = w.nulllen;
+		if (w.nulllen > 0)
+		{
+			f->nullif = palloc(w.nulllen + 1);
+			memcpy((void *) f->nullif, p, w.nulllen);
+			((char *) f->nullif)[w.nulllen] = '\0';
+			p += w.nulllen;
+		}
+		else
+			f->nullif = "";
+
+		/* work buffer for Read_char (needs a writable copy to trim) */
+		if (f->character)
+			f->str = palloc(f->len * BIN_STR_GROWTH + 1);
+		else
+			f->str = NULL;
+		f->in = NULL;
+	}
+
+	*out = fields;
+}

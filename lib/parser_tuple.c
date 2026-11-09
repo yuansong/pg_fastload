@@ -1,5 +1,5 @@
 /*
- * pg_bulkload: lib/parser_tuple.c
+ * pg_fastload: lib/parser_tuple.c
  *
  *	  Copyright (c) 2009-2026, NTT, Inc.
  */
@@ -8,7 +8,7 @@
  * @file
  * @brief Binary HeapTuple format handling module implementation.
  */
-#include "pg_bulkload.h"
+#include "pg_fastload.h"
 
 #include "access/htup.h"
 #include "utils/rel.h"
@@ -92,7 +92,7 @@ TupleParserRead(TupleParser *self, Checker *checker)
 {
 	uint32		len;
 
-	BULKLOAD_PROFILE(&prof_reader_parser);
+	FASTLOAD_PROFILE(&prof_reader_parser);
 
 	if (QueueRead(self->queue, &len, sizeof(uint32), false) == sizeof(uint32) && len > 0)
 	{
@@ -103,7 +103,7 @@ TupleParserRead(TupleParser *self, Checker *checker)
 		}
 		if (QueueRead(self->queue, self->buffer, len, false) == len)
 		{
-			BULKLOAD_PROFILE(&prof_reader_source);
+			FASTLOAD_PROFILE(&prof_reader_source);
 			self->tuple.t_len = len;
 			self->tuple.t_data = (HeapTupleHeader) self->buffer;
 			return &self->tuple;

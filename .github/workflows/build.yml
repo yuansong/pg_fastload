@@ -86,4 +86,4 @@ jobs:
 
     - name: check version
       shell: bash -xe {0}
-      run: bin/pg_bulkload --version
+      run: bin/pg_fastload --version

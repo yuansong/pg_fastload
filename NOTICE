@@ -1,0 +1,54 @@
+pg_fastload
+===========
+
+Attribution and provenance
+--------------------------
+
+pg_fastload is a derivative work (二次实现) of pg_bulkload.
+
+  Upstream project : pg_bulkload
+  Upstream version : 3.1.23
+  Upstream source  : https://github.com/ossc-db/pg_bulkload
+  Upstream HEAD    : 798e0f2 ("Add docs for migrating to COPY command (#179)")
+  Upstream license : BSD 3-Clause style license
+  Upstream notice  : COPYRIGHT (Copyright (c) 2008-2026, NTT, Inc.)
+
+The upstream project is distributed under the terms reproduced verbatim in
+COPYRIGHT and LICENSE.  pg_fastload retains that notice, retains the original
+copyright header in every inherited source file, and redistributes under the
+identical terms.  The additional contribution (parallel CSV loading) is
+
+  Author  : yuanyuansong
+  Copyright (c) 2026, yuanyuansong
+  License : BSD 3-Clause (same terms as upstream)
+
+Neither NTT, Inc. nor the pg_bulkload contributors endorse or sponsor this
+derivative work.  No upstream trademark or contributor name is used for
+promotion.
+
+What was kept
+-------------
+
+* All original reader / parser / checker / writer / source modules.
+* All original control-file keywords and their single-process semantics.
+* The original SQL entry point shape, renamed to pgfastload.pg_fastload().
+* The original COPYRIGHT file, unmodified.
+* The original C file headers ("Copyright (c) ... NTT, Inc.").
+
+What was added / changed
+------------------------
+
+* The project, extension, shared library, SQL schema, SQL function, control
+  file and all build artifacts were renamed from pg_bulkload to pg_fastload.
+* Version reset to 1.0.0 for the independent project.
+* New control-file keywords PARALLEL and PARALLEL_WORKERS.
+* TYPE=CSV with PARALLEL=ON now uses multiple PostgreSQL background worker
+  processes for stages (1)(2)(3); stage (4) stays serial.
+* New modules: lib/fastload_parallel.c, lib/fastload_worker.c,
+  include/fastload_parallel.h.
+* Removed: the earlier experimental "CSVMT" TYPE and lib/parser_csv_mt.c.
+  The parallel implementation is exposed as plain TYPE=CSV, not a new type.
+* New documentation: README.md, docs/ARCHITECTURE.md,
+  docs/PARALLEL_DESIGN.md, docs/CHANGES.md.
+
+See docs/CHANGES.md for the complete file-level modification list.
