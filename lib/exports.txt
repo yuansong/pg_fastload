@@ -1,0 +1,5 @@
+Pg_magic_func           1
+pg_fastload             2
+pg_finfo_pg_fastload    3
+pg_fastload_worker_main 4
+pg_fastload_reader_main 5
