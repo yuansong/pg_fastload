@@ -12,7 +12,6 @@
 
 #include <fcntl.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "access/heapam.h"
 #include "catalog/pg_proc.h"
@@ -38,6 +37,7 @@
 #include "pgut/pgut-be.h"
 #include "reader.h"
 
+#include "fastload_parallel.h"
 #include "storage/fd.h"
 
 #define DEFAULT_MAX_PARSE_ERRORS		0
@@ -98,22 +98,12 @@ ReaderInit(Reader *self)
 
 	/*
 	 * PARALLEL_WORKERS defaults to "online CPUs - 1": the leader backend
-	 * performing WriterInsert() occupies one CPU on its own.
+	 * performing WriterInsert() occupies one CPU on its own.  The single
+	 * definition of that rule lives in FastloadParallelRun()'s module so
+	 * the leader and the reader can never disagree about it.
 	 */
 	if (self->parallel && self->parallel_workers <= 0)
-	{
-		long	n = sysconf(_SC_NPROCESSORS_ONLN);
-		int		w;
-
-		if (n < 1)
-			n = 1;
-		w = (int) n - 1;
-		if (w < 1)
-			w = 1;
-		if (w > 64)
-			w = 64;
-		self->parallel_workers = w;
-	}
+		self->parallel_workers = FastloadDefaultWorkers();
 
 	/*
 	 * Use the client_encoding case of ENCODING is not specified and INPUT is
@@ -161,7 +151,11 @@ ReaderParam(Reader *rd, const char *keyword, char *target)
 	else if (CompareKeyword(keyword, "ESCAPE"))
 		rd->parallel_escape = ParseSingleChar(target);
 	else if (CompareKeyword(keyword, "NULL"))
+	{
+		if (rd->parallel_null != NULL)
+			pfree(rd->parallel_null);
 		rd->parallel_null = pstrdup(target);
+	}
 	else if (CompareKeyword(keyword, "FILTER"))
 		rd->parallel_has_filter = true;
 	else if (CompareKeyword(keyword, "FORCE_NOT_NULL"))
@@ -221,8 +215,7 @@ ReaderParam(Reader *rd, const char *keyword, char *target)
 	{
 		rd->parallel = ParseBoolean(target);
 	}
-	else if (CompareKeyword(keyword, "PARALLEL_WORKERS") ||
-			 CompareKeyword(keyword, "PARSE_WORKERS"))
+	else if (CompareKeyword(keyword, "PARALLEL_WORKERS"))
 	{
 		int64	n = ParseInt64(target, 0);
 
