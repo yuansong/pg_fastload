@@ -326,7 +326,7 @@ reason fixed-length loading is several times faster than CSV.
 
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
-| `PARSE_ERRORS` / `MAX_ERR_CNT` | integer, `-1` = unlimited | `0` | tolerated parse errors; exceeding it fails the load |
+| `PARSE_ERRORS` / `MAX_ERR_CNT` | integer, `-1` = unlimited | `0` | tolerated parse errors; **exceeding it stops reading** (rows already loaded are kept and the call returns normally, without an error) |
 | `PARSE_BADFILE` | path | `{log-basename}.prs.{ext}` | where failed records are written |
 | `DUPLICATE_ERRORS` | integer, `-1` = unlimited | `0` | tolerated duplicate-key errors |
 | `DUPLICATE_BADFILE` | path | `{log-basename}.dup.csv` | where duplicate rows are written |
@@ -528,7 +528,7 @@ Serial and parallel runs must produce the same digest; the verification suite as
 
 | Case | Serial path (`PARALLEL=OFF`) | Parallel path (`PARALLEL=ON`) |
 |---|---|---|
-| Wrong field count / input-function error / unterminated quote | counted in `parse_errors`; written to `PARSE_BADFILE` while ≤ `PARSE_ERRORS`, load continues | **the worker exits and the whole load fails** |
+| Wrong field count / input-function error / unterminated quote | counted in `parse_errors`, written to `PARSE_BADFILE`, load continues; once `PARSE_ERRORS` is exceeded reading **stops and the call returns normally** (log: `Maximum parse error count exceeded`), rows already loaded are kept | **the worker exits and the whole load fails** |
 | Duplicate key | written to `DUPLICATE_BADFILE` while ≤ `DUPLICATE_ERRORS`; `ON_DUPLICATE_KEEP` decides the survivor | handled serially by the leader, same behaviour as serial |
 | Constraint violation | error, rollback | error, rollback |
 

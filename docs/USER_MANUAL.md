@@ -332,7 +332,7 @@ CSV 语义细节见 [§9.1](#91-csv)。
 
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
-| `PARSE_ERRORS` / `MAX_ERR_CNT` | 整数，`-1` = 不限 | `0` | 允许的解析错误数；超过则装载失败 |
+| `PARSE_ERRORS` / `MAX_ERR_CNT` | 整数，`-1` = 不限 | `0` | 允许的解析错误数；**超过即停止读取**（已装载的行保留，本次调用正常返回，不报错） |
 | `PARSE_BADFILE` | 路径 | `{log-basename}.prs.{ext}` | 解析失败记录的落盘文件 |
 | `DUPLICATE_ERRORS` | 整数，`-1` = 不限 | `0` | 允许的重复键错误数 |
 | `DUPLICATE_BADFILE` | 路径 | `{log-basename}.dup.csv` | 重复键冲突记录的落盘文件 |
@@ -530,7 +530,7 @@ SELECT count(*) || '|' || sum(hash_record_extended(t, 0)) FROM public.t AS t;
 
 | 场景 | 串行路径（`PARALLEL=OFF`） | 并行路径（`PARALLEL=ON`） |
 |---|---|---|
-| 字段数不符 / 输入函数报错 / 未闭合引号 | 计入 `parse_errors`；≤ `PARSE_ERRORS` 时写入 `PARSE_BADFILE` 并继续 | **该 worker 退出，整次装载失败** |
+| 字段数不符 / 输入函数报错 / 未闭合引号 | 计入 `parse_errors`，写 `PARSE_BADFILE` 后继续；超过 `PARSE_ERRORS` 时**停止读取并正常返回**（日志 `Maximum parse error count exceeded`），已装载行保留 | **该 worker 退出，整次装载失败** |
 | 重复键 | `DUPLICATE_ERRORS` 上限内写入 `DUPLICATE_BADFILE`，按 `ON_DUPLICATE_KEEP` 取舍 | 由 leader 串行写入，行为与串行一致 |
 | 约束违反 | 报错回滚 | 报错回滚 |
 

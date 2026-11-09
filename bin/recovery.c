@@ -596,7 +596,15 @@ IsPageCreatedByLoader(Page page)
 	if (!PageHeaderIsValid(page))
 		return true;
 
+#if PG_VERSION_NUM >= 190000
+	/*
+	 * PostgreSQL 19 stores pd_lsn as a single 64-bit value whose byte order is
+	 * abstracted by PageXLogRecPtrGet().
+	 */
+	if (PageXLogRecPtrGet(&targetBlock->pd_lsn) == 0)
+#else
 	if (targetBlock->pd_lsn.xlogid == 0 && targetBlock->pd_lsn.xrecoff == 0)
+#endif
 		return true;
 	else
 		return false;

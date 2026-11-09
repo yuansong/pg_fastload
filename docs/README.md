@@ -5,6 +5,7 @@
 | [../README.md](../README.md) | [../README.en.md](../README.en.md) | 项目定位、与 pg_bulkload 的差异、架构摘要、快速开始、限制 |
 | [USER_MANUAL.md](USER_MANUAL.md) | [USER_MANUAL.en.md](USER_MANUAL.en.md) | 安装、控制文件语法、关键字全表、SQL/CLI 用法、并行调优、错误处理、FAQ、迁移与卸载 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | [ARCHITECTURE.en.md](ARCHITECTURE.en.md) | 四阶段流水线、组件职责、数据流、DSM/IPC 协议、降级设计、内存生命周期 |
+| [PORTING.md](PORTING.md) | [PORTING.en.md](PORTING.en.md) | PG 15–19 支持矩阵、内核差异与适配点、验收方法与结果、分支策略 |
 | [CHANGES.md](CHANGES.md) | — | 相对 pg_bulkload 3.1.23 的文件级修改点，按已采纳的轮次排列 |
 | [BENCHMARK.md](BENCHMARK.md) | — | 测量方法、1 GiB CSV / 定长结果、冷缓存、与上游的历史对比、调参建议 |
 | [VERIFICATION.md](VERIFICATION.md) | — | 验证环境、90/90 与 44/44 用例、构建与内存核查、合规检查、残留风险 |

@@ -251,7 +251,12 @@ DirectWriterInsert(DirectWriter *self, HeapTuple tuple)
 	Page			page;
 	OffsetNumber	offnum;
 	ItemId			itemId;
+#if PG_VERSION_NUM >= 190000
+	/* PostgreSQL 19 removed the Item typedef in favour of plain pointers. */
+	void		   *item;
+#else
 	Item			item;
+#endif
 	LoadStatus	   *ls = &self->ls;
 
 	/* Compress the tuple data if needed. */
@@ -310,8 +315,13 @@ DirectWriterInsert(DirectWriter *self, HeapTuple tuple)
 	HeapTupleHeaderSetXmax(tuple->t_data, 0);
 
 	/* put the tuple on local page. */
+#if PG_VERSION_NUM >= 190000
+	offnum = PageAddItem(page, tuple->t_data,
+		tuple->t_len, InvalidOffsetNumber, false, true);
+#else
 	offnum = PageAddItem(page, (Item) tuple->t_data,
 		tuple->t_len, InvalidOffsetNumber, false, true);
+#endif
 
 	ItemPointerSet(&(tuple->t_self), LS_TOTAL_CNT(ls) + self->curblk, offnum);
 	itemId = PageGetItemId(page, offnum);
@@ -604,7 +614,11 @@ flush_pages(DirectWriter *loader)
 			for (j = 0; j < flush_num; j++)
 			{
 				contained_page = GetTargetPage(loader, i + j);
+#if PG_VERSION_NUM >= 190000
+				PageSetChecksum(contained_page, LS_TOTAL_CNT(ls) + j);
+#else
 				PageSetChecksumInplace(contained_page, LS_TOTAL_CNT(ls) + j);
+#endif
 			}
 		}	
 #endif
@@ -673,11 +687,11 @@ open_data_file(
 	RelFileNodeBackend	bknode;
 	bknode.node = rnode;
 #endif  /* PG_VERSION_NUM >= 160000 */
-#if PG_VERSION_NUM >= 170000
-	bknode.backend = istemp ? MyBackendType : InvalidCommandId;
+#if PG_VERSION_NUM >= 160000
+	bknode.backend = istemp ? FastloadBackendNumber : FastloadInvalidBackend;
 #else
 	bknode.backend = istemp ? MyBackendId : InvalidBackendId;
-#endif  /* PG_VERSION_NUM >= 170000 */
+#endif  /* PG_VERSION_NUM >= 160000 */
 #if PG_VERSION_NUM >= 180000
 	fname = pstrdup(relpath(bknode, MAIN_FORKNUM).str);
 #else

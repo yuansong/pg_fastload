@@ -302,7 +302,14 @@ fl_build_tupdesc(FastloadParams *p)
 									p->cols[i].attcollation);
 		TupleDescAttr(desc, i)->attnotnull = p->cols[i].attnotnull;
 		TupleDescAttr(desc, i)->attisdropped = p->cols[i].attisdropped;
+#if PG_VERSION_NUM >= 180000
+		/*
+		 * PostgreSQL 18 precomputes the per-attribute metadata that used to be
+		 * filled in lazily on first access.  On older majors that work is done
+		 * on demand inside the accessors, so the call is simply not needed.
+		 */
 		populate_compact_attribute(desc, i);
+#endif
 	}
 	return desc;
 }

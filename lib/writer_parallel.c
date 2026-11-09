@@ -10,7 +10,11 @@
 
 #include "access/heapam.h"
 #include "access/xact.h"
-#include "commands/dbcommands.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/lsyscache.h"	/* get_database_name() */
+#else
+#include "commands/dbcommands.h"	/* get_database_name() */
+#endif
 #if PG_VERSION_NUM >= 160000
 #include "utils/guc_hooks.h"
 #else
