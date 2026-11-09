@@ -4,7 +4,7 @@ pg_fastload
 Attribution and provenance
 --------------------------
 
-pg_fastload is a derivative work (二次实现) of pg_bulkload.
+pg_fastload is a re-implementation (derivative work) of pg_bulkload.
 
   Upstream project : pg_bulkload
   Upstream version : 3.1.23
@@ -50,11 +50,14 @@ What was added / changed
 * Removed: an earlier experimental multi-threaded CSV prototype, together
   with its parser source file and build entry. The parallel implementation
   is exposed as plain TYPE=CSV / BINARY / FIXED, never as a new TYPE.
-* New documentation (Chinese and English): README.md, README.en.md,
-  docs/USER_MANUAL.md, docs/USER_MANUAL.en.md, docs/ARCHITECTURE.md,
-  docs/ARCHITECTURE.en.md, docs/CHANGES.md, docs/BENCHMARK.md,
-  docs/VERIFICATION.md, docs/OPTIMIZATION.md, docs/img/architecture*.svg.
+* New documentation in English (primary) and Chinese (`.zh-CN.md`):
+  README.md / README.zh-CN.md, docs/USER_MANUAL.md / USER_MANUAL.zh-CN.md,
+  docs/ARCHITECTURE.md / ARCHITECTURE.zh-CN.md, docs/PORTING.md / PORTING.zh-CN.md,
+  docs/CHANGES.md / CHANGES.zh-CN.md, docs/BENCHMARK.md / BENCHMARK.zh-CN.md,
+  docs/VERIFICATION.md / VERIFICATION.zh-CN.md, docs/OPTIMIZATION.md /
+  OPTIMIZATION.zh-CN.md, docs/README.md / README.zh-CN.md, and the diagrams
+  docs/img/architecture.svg (English) / architecture.zh-CN.svg (Chinese).
   The inherited HTML manual has been removed: its numbers date from the
-  PostgreSQL 9.3 era and its content is superseded by USER_MANUAL*.md.
+  PostgreSQL 9.3 era and its content is superseded by USER_MANUAL.md.
 
 See docs/CHANGES.md for the complete file-level modification list.
