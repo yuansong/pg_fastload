@@ -46,7 +46,7 @@ cd "$SRC" || fail "no source tree"
 make USE_PGXS=1 PG_CONFIG="$PG/bin/pg_config" clean >>"$OUT" 2>&1
 if ! make USE_PGXS=1 PG_CONFIG="$PG/bin/pg_config" >>"$OUT" 2>&1; then
   say "BUILD_ERRORS:"
-  grep -E "error:|错误：" "$OUT" | head -30 | tee -a "$OUT"
+  grep -E "error:" "$OUT" | head -30 | tee -a "$OUT"
   fail "build"
 fi
 make USE_PGXS=1 PG_CONFIG="$PG/bin/pg_config" install >>"$OUT" 2>&1 || fail "install"
@@ -204,7 +204,7 @@ say "  cli rc=$cli_rc rows=$cli_rows"
 [ "$cli_rows" = "$ROWS" ] || fail "cli loaded $cli_rows rows"
 
 say "--- server log check ---"
-if grep -qE "PANIC|segmentation|Segmentation|段错误" "$DATA/server.log"; then
+if grep -qE "PANIC|segmentation|Segmentation" "$DATA/server.log"; then
   fail "panic/segfault in server log"
 fi
 say "no panic/segfault in server log"

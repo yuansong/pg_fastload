@@ -1,234 +1,252 @@
-# 相对 pg_bulkload 3.1.23 的修改点
+# Changes Relative to pg_bulkload 3.1.23
 
-> 上游：`https://github.com/ossc-db/pg_bulkload`，HEAD `798e0f2`，版本 3.1.23
-> 本项目作者：yuanyuansong，2026
+> Upstream: `https://github.com/ossc-db/pg_bulkload`, HEAD `798e0f2`, version 3.1.23
+> Author: yuanyuansong, 2026
 >
-> 本文只记录**已采纳**的改动，按轮次排列；评估后未采纳的方案集中记录在
-> [OPTIMIZATION.md](OPTIMIZATION.md) 的「未采纳方案」一节，不在本文逐轮重复。
+> This document records only **adopted** changes, arranged by round; approaches that were
+> evaluated and not adopted are collected in the "Rejected Approaches" section of
+> [OPTIMIZATION.md](OPTIMIZATION.md), and are not repeated round-by-round here.
 
 ---
 
-## 1. 全局更名（108 个文件 + 18 个文件/目录名）
+## 1. Global Renaming (108 files + 18 file/directory names)
 
-| 原名 | 新名 |
+| Original name | New name |
 |---|---|
-| 项目 / 扩展 / 共享库 `pg_bulkload` | `pg_fastload` |
+| Project / extension / shared library `pg_bulkload` | `pg_fastload` |
 | SQL schema `pgbulkload` | `pgfastload` |
-| SQL 函数 `pgbulkload.pg_bulkload()` | `pgfastload.pg_fastload()` |
+| SQL function `pgbulkload.pg_bulkload()` | `pgfastload.pg_fastload()` |
 | `lib/pg_bulkload.c` / `.sql.in` / `.control` / `--3.1.23.sql` | `pg_fastload.c` / `.sql.in` / `.control` / `--1.0.0.sql` |
 | `include/pg_bulkload.h` | `include/pg_fastload.h` |
-| 宏 `PG_BULKLOAD_*` / `BULKLOAD_*` / `FASTLOAD_PROFILE*` | `PG_FASTLOAD_*` / `FASTLOAD_*` |
-| `bin/pg_bulkload.c` / 客户端可执行名 | `bin/pg_fastload.c` / `pg_fastload` |
-| `SPECS/pg_bulkload-pg*.spec` / `msvc/*` / `docs/pg_bulkload*.html` | 对应 `pg_fastload*` |
+| Macros `PG_BULKLOAD_*` / `BULKLOAD_*` / `FASTLOAD_PROFILE*` | `PG_FASTLOAD_*` / `FASTLOAD_*` |
+| `bin/pg_bulkload.c` / client executable name | `bin/pg_fastload.c` / `pg_fastload` |
+| `SPECS/pg_bulkload-pg*.spec` / `msvc/*` / `docs/pg_bulkload*.html` | corresponding `pg_fastload*` |
 
-版本号重置为 `1.0.0`（独立项目起点）。
+Version number reset to `1.0.0` (starting point of the standalone project).
 
-**未改动**：`COPYRIGHT` 原文件（BSD-3-Clause，NTT, Inc. 2008-2026）逐字节保留；所有继承源文件
-头部的 `Copyright (c) ... NTT, Inc.` 行保留。
+**Unchanged**: The original `COPYRIGHT` file (BSD-3-Clause, NTT, Inc. 2008-2026) is preserved
+byte-for-byte; the `Copyright (c) ... NTT, Inc.` line at the top of every inherited source file
+is preserved.
 
 ---
 
-## 2. 新增文件
+## 2. New Files
 
-| 文件 | 作用 |
+| File | Purpose |
 |---|---|
-| `LICENSE` | BSD-3-Clause 许可 + 原版权声明 + 并行化贡献版权 |
-| `NOTICE` | 来源、版本、许可、署名、保留项与修改项说明 |
-| `README.md` / `README.en.md` | 项目说明（中 / 英）：定位、与 pg_bulkload 的差异、架构、快速开始、限制 |
-| `docs/USER_MANUAL.md` / `.en.md` | 用户手册（中 / 英）：安装、关键字全表、用法、并行调优、FAQ |
-| `docs/ARCHITECTURE.md` / `.en.md` | 整体架构、组件职责、数据流、IPC 协议、降级设计（中 / 英） |
-| `docs/CHANGES.md` | 本文件 |
-| `docs/BENCHMARK.md` | 性能基准 |
-| `docs/VERIFICATION.md` | 验证报告 |
-| `docs/OPTIMIZATION.md` | 优化记录与未采纳方案 |
-| `docs/img/architecture.svg` / `architecture.zh-CN.svg` | 架构图（英 / 中） |
-| `include/fastload_parallel.h` | DSM 共享协议：`FastloadParams` / `FastloadColumn` / `FastloadShared` / `FastloadWorkerId`、shm_toc key、队列容量、magic |
-| `lib/fastload_parallel.c` | **leader 侧**：`FastloadDefaultWorkers()`、`FastloadParallelSupported()`、`FastloadParallelRun()`；DSM/shm_toc/shm_mq 创建、bgworker 注册、round-robin 消费、`WriterInsert()` 前可写副本 |
-| `lib/fastload_worker.c` | **reader / worker 侧**：`pg_fastload_reader_main()`、`pg_fastload_worker_main()`、CSV quote-aware 边界状态机、定长 STRIDE 切分、分块轮转路由、字段切分、复用 `TupleFormer` 形成元组、`shm_mq_send` |
+| `LICENSE` | BSD-3-Clause license + original copyright notice + parallelization contribution copyright |
+| `NOTICE` | Source, version, license, attribution, retained and modified items |
+| `README.md` (English) / `README.zh-CN.md` (Chinese) | Project overview: positioning, differences vs. pg_bulkload, architecture, quick start, limitations |
+| `docs/USER_MANUAL.md` (English) / `docs/USER_MANUAL.zh-CN.md` (Chinese) | User manual: installation, full keyword table, usage, parallel tuning, FAQ |
+| `docs/ARCHITECTURE.md` (English) / `docs/ARCHITECTURE.zh-CN.md` (Chinese) | Overall architecture, component responsibilities, data flow, IPC protocol, downgrade design |
+| `docs/CHANGES.md` | This file |
+| `docs/BENCHMARK.md` | Performance benchmarks |
+| `docs/VERIFICATION.md` | Verification report |
+| `docs/OPTIMIZATION.md` | Optimization log and rejected approaches |
+| `docs/img/architecture.svg` (English) / `docs/img/architecture.zh-CN.svg` (Chinese) | Architecture diagram |
+| `include/fastload_parallel.h` | DSM shared protocol: `FastloadParams` / `FastloadColumn` / `FastloadShared` / `FastloadWorkerId`, shm_toc key, queue capacity, magic |
+| `lib/fastload_parallel.c` | **leader side**: `FastloadDefaultWorkers()`, `FastloadParallelSupported()`, `FastloadParallelRun()`; DSM/shm_toc/shm_mq creation, background worker registration, round-robin consumption, writable copy before `WriterInsert()` |
+| `lib/fastload_worker.c` | **reader / worker side**: `pg_fastload_reader_main()`, `pg_fastload_worker_main()`, CSV quote-aware boundary state machine, fixed-length STRIDE slicing, chunked round-robin routing, field splitting, reusing `TupleFormer` to form tuples, `shm_mq_send` |
 
 ---
 
-## 3. 修改文件
+## 3. Modified Files
 
-| 文件 | 修改内容 |
+| File | Changes |
 |---|---|
-| `include/reader.h` | `struct Reader` 增加 `parallel`、`parallel_workers`、`is_csv`、`is_fixed`、`parallel_skip`、`parallel_delim/quote/escape`、`parallel_null`、`parallel_has_filter`、`parallel_has_fnn` |
-| `lib/reader.c` | ① `ReaderCreate()` 记录 `is_csv`（`TYPE=CSV`）与 `is_fixed`（`TYPE=BINARY/FIXED`）；② `ReaderInit()` 用 `FastloadDefaultWorkers()` 计算默认 worker 数；③ `ReaderParam()` 新增 `PARALLEL` / `PARALLEL_WORKERS`；④ 镜像 `SKIP/OFFSET`、`DELIMITER`、`QUOTE`、`ESCAPE`、`NULL`、`FILTER`、`FORCE_NOT_NULL` 到 Reader，同时**仍转发给 `ParserParam()`**，单进程语义不变 |
-| `lib/pg_fastload.c` | 主循环改为 `if (FastloadParallelSupported(rd, wt)) FastloadParallelRun(...); else 原循环`；`<PARALLEL>` profile 组新增 `READ` 段；其他统计/日志/收尾逻辑不动 |
-| `lib/binary.c` + `include/binary.h` | 新增 `COL` 描述符序列化：`BinaryParserGetMeta`、`BinarySerializedSize`、`BinarySerializeFields`、`BinaryDeserializeFields`（定长并行用，函数指针不跨进程） |
-| `lib/parser_binary.c` | 导出 `BinaryParserGetMeta`（nfield / rec_len / fields） |
-| `lib/pg_btree.c` | `SpoolerInsert()` 在 `ri_NumIndices <= 0` 时提前返回，消除无索引表的每元组空转 |
-| `include/pg_profile.h` | 新增并行阶段埋点：`prof_par_setup/wait/copy/write/read`、`prof_par_scan/form/ipc` |
-| `lib/Makefile` | `SRCS` 增加 `fastload_parallel.c`、`fastload_worker.c`；其余（含 `-lpthread`、`pgut/pgut-ipc.c`）保留 |
-| `lib/exports.txt` | 增加导出符号 `pg_fastload_worker_main`（bgworker 通过 `load_external_function` 按符号名加载） |
+| `include/reader.h` | `struct Reader` gains `parallel`, `parallel_workers`, `is_csv`, `is_fixed`, `parallel_skip`, `parallel_delim/quote/escape`, `parallel_null`, `parallel_has_filter`, `parallel_has_fnn` |
+| `lib/reader.c` | ① `ReaderCreate()` records `is_csv` (`TYPE=CSV`) and `is_fixed` (`TYPE=BINARY/FIXED`); ② `ReaderInit()` uses `FastloadDefaultWorkers()` to compute the default worker count; ③ `ReaderParam()` adds `PARALLEL` / `PARALLEL_WORKERS`; ④ mirrors `SKIP/OFFSET`, `DELIMITER`, `QUOTE`, `ESCAPE`, `NULL`, `FILTER`, `FORCE_NOT_NULL` onto Reader while **still forwarding them to `ParserParam()`**, so single-process semantics are unchanged |
+| `lib/pg_fastload.c` | The main loop is changed to `if (FastloadParallelSupported(rd, wt)) FastloadParallelRun(...); else original loop`; the `<PARALLEL>` profile group gains a new `READ` segment; other statistics/logging/cleanup logic is untouched |
+| `lib/binary.c` + `include/binary.h` | New `COL` descriptor serialization: `BinaryParserGetMeta`, `BinarySerializedSize`, `BinarySerializeFields`, `BinaryDeserializeFields` (for fixed-length parallelism; function pointers do not cross processes) |
+| `lib/parser_binary.c` | Exports `BinaryParserGetMeta` (nfield / rec_len / fields) |
+| `lib/pg_btree.c` | `SpoolerInsert()` returns early when `ri_NumIndices <= 0`, eliminating per-tuple no-op overhead for index-less tables |
+| `include/pg_profile.h` | New parallel-stage probes: `prof_par_setup/wait/copy/write/read`, `prof_par_scan/form/ipc` |
+| `lib/Makefile` | `SRCS` adds `fastload_parallel.c`, `fastload_worker.c`; the rest (including `-lpthread`, `pgut/pgut-ipc.c`) is retained |
+| `lib/exports.txt` | Adds exported symbol `pg_fastload_worker_main` (the background worker loads it by symbol name via `load_external_function`) |
 
 ---
 
-## 4. 删除 / 丢弃
+## 4. Removed / Discarded
 
-- **实验性的多线程 CSV 原型已全部丢弃**（含其解析器源文件与构建项）：并行能力不以新的 `TYPE`
-  暴露，而是 `PARALLEL=ON` 时由 `TYPE=CSV / BINARY / FIXED` 自动启用。`ReaderCreate()` 的类型列表
-  与上游完全一致：`BINARY / FIXED / CSV / TUPLE / FUNCTION`。
-- **上游 HTML 手册**（`docs/index.html`、`pg_fastload.html`、`pg_timestamp.html`、`style.css`
-  及日文版 `*_ja.html`）删除：其性能数据为 PostgreSQL 9.3 时代、内容已被
-  `docs/USER_MANUAL*.md` 完整覆盖且与实际实现不一致，保留会造成误导。
-
----
-
-## 5. 完全未改动的模块
-
-`lib/parser_csv.c`、`lib/parser_tuple.c`、`lib/parser_function.c`、`lib/source.c`、
-`lib/writer*.c`（含 `writer_parallel.c`）、`lib/logger.c`、`lib/pg_strutil.c`、`bin/*`（除更名）、
-`util/*`、`SPECS/*`、`msvc/*`、`lib/pgut/*`。
-
-这保证了：
-
-- 所有原有控制文件关键字与语义不变；
-- `WRITER = DIRECT / BUFFERED / PARALLEL` 三种写入方式不变；
-- `badfile` / 逐行容错 / `SKIP` / `LIMIT` / `ENCODING` / `FILTER` / `FORCE_NOT_NULL` 在单进程路径下不变；
-- 上游 PARALLEL writer 依赖的 `pgut-ipc.c` 仍在构建中。
+- **The experimental multithreaded CSV prototype has been fully discarded** (including its parser
+  source files and build entries): parallel capability is not exposed via a new `TYPE`; instead,
+  when `PARALLEL=ON` it is auto-enabled by `TYPE=CSV / BINARY / FIXED`. `ReaderCreate()`'s type list
+  is identical to upstream: `BINARY / FIXED / CSV / TUPLE / FUNCTION`.
+- **Upstream HTML manual** (`docs/index.html`, `pg_fastload.html`, `pg_timestamp.html`, `style.css`,
+  and the Japanese `*_ja.html` variants) removed: its performance data dates from the
+  PostgreSQL 9.3 era, its content is fully covered by `docs/USER_MANUAL*.md`, and it is
+  inconsistent with the actual implementation; retaining it would be misleading.
 
 ---
 
-## 6. 新增行为摘要
+## 5. Completely Unchanged Modules
 
-| 控制文件 | 行为 |
+`lib/parser_csv.c`, `lib/parser_tuple.c`, `lib/parser_function.c`, `lib/source.c`,
+`lib/writer*.c` (including `writer_parallel.c`), `lib/logger.c`, `lib/pg_strutil.c`, `bin/*` (renamed only),
+`util/*`, `SPECS/*`, `msvc/*`, `lib/pgut/*`.
+
+This guarantees:
+
+- All original control-file keywords and semantics are unchanged;
+- The three write modes `WRITER = DIRECT / BUFFERED / PARALLEL` are unchanged;
+- `badfile` / per-row error tolerance / `SKIP` / `LIMIT` / `ENCODING` / `FILTER` / `FORCE_NOT_NULL` are unchanged on the single-process path;
+- Upstream's `pgut-ipc.c`, required by the PARALLEL writer, remains in the build.
+
+---
+
+## 6. Summary of New Behavior
+
+| Control file | Behavior |
 |---|---|
-| `PARALLEL = OFF`（默认） | 与 pg_bulkload 完全一致 |
-| `PARALLEL = ON`, `TYPE = CSV / BINARY / FIXED` | 多进程并行 ①②③，④ 主 backend 串行 |
-| `PARALLEL = ON`, `TUPLE / FUNCTION` | 自动降级为单进程（INFO 提示） |
-| `PARALLEL = ON` + `FILTER` / `FORCE_NOT_NULL` / dropped 列 / 转码 / NOT NULL / `CHECK_CONSTRAINTS` / `PARSE_ERRORS` / `STDIN` / `MULTI_PROCESS` | 自动降级为单进程（INFO 提示，完整清单见 USER_MANUAL §10.4） |
-| `PARALLEL_WORKERS = n` | 显式指定 1..64 |
-| 未指定 `PARALLEL_WORKERS` | 在线 CPU 核数 − 1，clamp 到 1..64 |
+| `PARALLEL = OFF` (default) | Identical to pg_bulkload |
+| `PARALLEL = ON`, `TYPE = CSV / BINARY / FIXED` | Multi-process parallelism ①②③; ④ the main backend runs serially |
+| `PARALLEL = ON`, `TUPLE / FUNCTION` | Auto-downgraded to single process (INFO message) |
+| `PARALLEL = ON` + `FILTER` / `FORCE_NOT_NULL` / dropped columns / transcoding / NOT NULL / `CHECK_CONSTRAINTS` / `PARSE_ERRORS` / `STDIN` / `MULTI_PROCESS` | Auto-downgraded to single process (INFO message; full list in USER_MANUAL §10.4) |
+| `PARALLEL_WORKERS = n` | Explicitly specifies 1..64 |
+| When `PARALLEL_WORKERS` is not specified | Online CPU core count − 1, clamped to 1..64 |
 
 ---
 
-## 7. 合规说明
+## 7. Compliance Notes
 
-- 保留 `COPYRIGHT` 原文（BSD-3-Clause 第 1、2 条要求）。
-- 每个继承源文件保留 NTT 版权行；新增/修改文件额外标注 `Copyright (c) 2026, yuanyuansong`。
-- 明确声明基于 pg_bulkload 3.1.23 二次实现、遵循原许可、未使用 NTT 名义背书（第 3 条要求）。
-- 二进制分发时需在随附文档中复现版权声明与免责条款；`LICENSE` / `NOTICE` / `COPYRIGHT` 随源码提供。
+- The original `COPYRIGHT` text is retained (required by BSD-3-Clause clauses 1 and 2).
+- Every inherited source file retains its NTT copyright line; newly added/modified files
+  additionally carry `Copyright (c) 2026, yuanyuansong`.
+- It is explicitly stated that this is a derivative implementation based on pg_bulkload 3.1.23,
+  follows the original license, and does not use the NTT name for endorsement (clause 3 requirement).
+- Binary distributions must reproduce the copyright notice and disclaimer in accompanying
+  documentation; `LICENSE` / `NOTICE` / `COPYRIGHT` are provided with the source.
 
 ---
 
-## 8. 首轮联调修复记录
+## 8. First-Round Integration Fixes
 
-| 问题 | 根因 | 修复 |
+| Problem | Root cause | Fix |
 |---|---|---|
-| `PARALLEL=ON` 被无声降级为单进程 | `rd->checker.tchecker != NULL` 是恒真条件：所有 writer 都无条件 `CreateTupleChecker()`；对 CSV 而言 `CoercionCheckerTuple()` 判定 `NO_COERCION` 后原样返回 tuple，worker 的 `TupleFormerTuple()` 输出与之等价 | 从 `FastloadParallelSupported()` 移除该条件，并在注释与文档中写明不可加回 |
-| 小文件偶发 `worker N failed to attach (state=2)` | worker 抢在主 backend 之前跑完并 detach，`shm_mq_wait_for_attach()` 返回 `SHM_MQ_DETACHED`；`state=2` 实为 `FL_WORKER_DONE` | 编排层容忍 `DETACHED + FL_WORKER_DONE`，仅对未到达 DONE 的 worker 报错；PG 原生 shm_mq 保证剩余消息仍可排空 |
-| `SKIP` / `LIMIT` 语义与上游不一致（交错分片下「最先到达的 N 条」不确定） | worker 原先只按记录号取模，未限制全局记录窗口 | worker 侧按 `[skip, skip+limit)` 窗口裁剪，先减后比避免溢出 |
-| 并行分工不可观测 | 缺少每 worker 产出统计 | `FastloadParallelRun()` 正常收尾后打印 `worker #i produced N rows` |
+| `PARALLEL=ON` silently downgraded to single process | `rd->checker.tchecker != NULL` was an always-true condition: every writer unconditionally calls `CreateTupleChecker()`; for CSV, `CoercionCheckerTuple()` returns the tuple as-is after deciding `NO_COERCION`, which is equivalent to the worker's `TupleFormerTuple()` output | Removed that condition from `FastloadParallelSupported()` and documented in comments and docs that it must not be re-added |
+| Small files occasionally hit `worker N failed to attach (state=2)` | A worker finished and detached before the main backend, so `shm_mq_wait_for_attach()` returned `SHM_MQ_DETACHED`; `state=2` is actually `FL_WORKER_DONE` | The orchestration layer tolerates `DETACHED + FL_WORKER_DONE`, reporting an error only for workers that never reached DONE; native PG shm_mq guarantees the remaining messages can still be drained |
+| `SKIP` / `LIMIT` semantics inconsistent with upstream (under interleaved sharding, "the first N rows to arrive" is non-deterministic) | Workers previously only took modulo of record number, without bounding the global record window | Workers clip to the `[skip, skip+limit)` window on their side, subtracting before comparing to avoid overflow |
+| Parallel division of labor was not observable | Missing per-worker output statistics | `FastloadParallelRun()` prints `worker #i produced N rows` after normal completion |
 
 ---
 
-## 9. P0 性能优化（2026-11-08 第二轮）
+## 9. P0 Performance Optimizations (Round 2, 2026-11-08)
 
-依据：1 GiB TPC-H lineitem 基准 + `USE_PROFILE=1` 阶段计时
-（`READER.PARSER` 占原版耗时 78.6%、并行路径 N× 全量扫描占 auto 耗时 65%、
-`WRITER.TOAST` 被误累积为 15.39 s 等结论）。
+Basis: 1 GiB TPC-H lineitem benchmark + `USE_PROFILE=1` stage timing (conclusions such as
+`READER.PARSER` accounting for 78.6% of the original runtime, the N× full scan of the parallel
+path accounting for 65% of the auto runtime, and `WRITER.TOAST` being mis-accumulated to 15.39 s).
 
-| # | 瓶颈 | 修改 | 效果（1 GiB，16 vCPU） |
+| # | Bottleneck | Change | Effect (1 GiB, 16 vCPU) |
 |---|---|---|---|
-| P0-1 | `PARALLEL_WORKERS=1` 仍创建 DSM + bgworker + shm_mq，耗时 16.2 s（串行 8.2 s 的 2 倍） | `FastloadParallelSupported()` 对有效 worker 数 ≤ 1 返回 false 并输出 INFO，走原版单进程 CSV 循环 | w=1 **16.215 → 8.070 s（2.01×）**，与 `PARALLEL=OFF` 等价 |
-| P0-2 | worker 对每条记录逐字节调用 `fl_append_rec()` 拷贝（含大量非归属记录），整条记录再二遍切分 | 记录边界状态机改为 run-based 连续区间 `memcpy`；非归属记录零拷贝直接跳过；归属记录按连续段一次拷入。引号/转义/CRLF/跨块/末行无换行语义不变 | w=2 **7.760 → 6.820 s（1.14×）**，w=4 **3.270 → 2.950 s（1.11×）**，w=8 **2.530 → 2.320 s（1.09×）** |
-| P0-3 | 并行路径无任何 profile 埋点：GLOBAL 各阶段读 0，leader 等待时间被误累积进 `WRITER.TOAST` | 新增 `GLOBAL.PARALLEL` 总段 + `<PARALLEL>`（SETUP/WAIT/COPY/WRITE）+ `<WORKER>`（SCAN/FORM/IPC，worker 经 DSM 发布本地计时）；`WriterInsert` 内层 PUSH/POP | GLOBAL 合计 ≈ elapsed；`WRITER.TOAST` 回归 0.12~0.14 s 正常量级 |
+| P0-1 | `PARALLEL_WORKERS=1` still created DSM + background worker + shm_mq, taking 16.2 s (2× the 8.2 s serial time) | `FastloadParallelSupported()` returns false and emits INFO when the effective worker count ≤ 1, falling back to the original single-process CSV loop | w=1 **16.215 → 8.070 s (2.01×)**, equivalent to `PARALLEL=OFF` |
+| P0-2 | The worker called `fl_append_rec()` per byte to copy each record (including many non-owned records), then re-split the whole record a second time | The record-boundary state machine was changed to run-based contiguous-range `memcpy`; non-owned records are skipped with zero copy; owned records are copied in one pass per contiguous segment. Quote/escape/CRLF/cross-block/no-trailing-newline semantics are unchanged | w=2 **7.760 → 6.820 s (1.14×)**, w=4 **3.270 → 2.950 s (1.11×)**, w=8 **2.530 → 2.320 s (1.09×)** |
+| P0-3 | The parallel path had no profile probes: every GLOBAL stage read 0, and the leader's wait time was mis-accumulated into `WRITER.TOAST` | Added a `GLOBAL.PARALLEL` total segment + `<PARALLEL>` (SETUP/WAIT/COPY/WRITE) + `<WORKER>` (SCAN/FORM/IPC, workers publish local timings via DSM); inner PUSH/POP around `WriterInsert` | GLOBAL total ≈ elapsed; `WRITER.TOAST` returns to the normal 0.12~0.14 s range |
 
-验证：release + debug 双构建 rc=0；`fastload_verify.py` **90/90 PASS**；
-7 配置 1 GiB 内容摘要（`count||sum(hash_record_extended)`）完全一致。
+Verification: release + debug dual build rc=0; `fastload_verify.py` **90/90 PASS**; the 1 GiB
+content digests (`count||sum(hash_record_extended)`) for all 7 configurations are identical.
 
 ---
 
-## 10. 单读多解并行架构（2026-11-08 第三轮）
+## 10. Single-Reader, Multi-Worker Parallel Architecture (Round 3, 2026-11-08)
 
-依据：首版「每个 worker 各自 `open()` 全量 CSV 扫描」的结构性瓶颈——I/O ×N、N 份重复边界扫描，
-文件超出 page cache 时总读量 ≈ N × 文件大小（冷缓存实测比串行慢 6.49×）。
+Basis: the structural bottleneck of the first version—"each worker independently `open()`s and
+fully scans the CSV"—where I/O ×N and N duplicate boundary scans meant total reads ≈ N × file
+size when the file exceeds the page cache (cold cache measured 6.49× slower than serial).
 
-**架构**：单个 reader bgworker（无 DB 连接）单遍扫描 CSV，把记录按分块轮转分发给 N 个解析
-worker；worker 只解析归属记录并经 shm_mq 回传 leader。文件 I/O 从 ×N 降为 ×1。
-reader 为 handle[0]，worker 为 handle[1..N]；`max_worker_processes ≥ N+1`。
+**Architecture**: a single reader background worker (no DB connection) scans the CSV in a single
+pass and distributes records to N parsing workers via chunked round-robin; workers only parse
+their owned records and send them back to the leader via shm_mq. File I/O drops from ×N to ×1.
+The reader is handle[0] and workers are handle[1..N]; `max_worker_processes ≥ N+1`.
 
-三个实测瓶颈与修复（每次修复均经 profile 数据确认）：
+Three empirically observed bottlenecks and their fixes (each fix confirmed by profile data):
 
-| # | 瓶颈（profile 证据） | 修改 | 效果（1 GiB，w=2） |
+| # | Bottleneck (profile evidence) | Change | Effect (1 GiB, w=2) |
 |---|---|---|---|
-| C-1 | reader 逐条 `rec_no % N` 交错路由造成队头阻塞：一条环满即卡死全部环（reader blocked 9.205 s / 8.49M waits） | 改为**字节量分块轮转**：每 ~512 KiB 连续记录切换 owner（`FL_ROUTE_BYTES`），路由字节数只统计窗口内记录 | 与 C-2/C-3 叠加后生效 |
-| C-2 | worker 逐条取环：每记录 2 次 spinlock + 2 次小 memcpy（1500 万次锁操作，与 reader 争用），worker SCAN 5.2 s | worker 侧**批量取环**：一次锁内整块拉取，无锁切帧；超大记录回退流式读取 | SCAN 5.2 → 0.32 s |
-| C-3 | 1 MiB 环只缓冲 2 个 512 KiB 路由块（≈6 ms worker 工作量）：reader 被一个环阻塞的整个窗口内其余环全部挨饿（worker idle ~45%） | 队列容量 **1 MiB → 8 MiB**，回传队列 1 → 2 MiB；DSM 随实际 worker 数伸缩（15 worker ≈ 144 MiB） | **w2 10.59 → 3.46 s（3.06×）**、w4 5.13 → 1.97 s、w8 2.34 → 1.95 s |
+| C-1 | The reader's per-record `rec_no % N` interleaved routing caused head-of-line blocking: a single full ring stalled all rings (reader blocked 9.205 s / 8.49M waits) | Changed to **byte-based chunked round-robin**: owner switches every ~512 KiB of contiguous records (`FL_ROUTE_BYTES`); routed byte count only counts records within the window | Takes effect combined with C-2/C-3 |
+| C-2 | The worker fetched the ring per record: 2 spinlocks + 2 small memcpys per record (15 million lock operations, contending with the reader), worker SCAN 5.2 s | **Bulk ring fetch** on the worker side: pull the whole block within a single lock, switch frames without locking; oversized records fall back to streaming reads | SCAN 5.2 → 0.32 s |
+| C-3 | A 1 MiB ring buffered only 2 routing blocks of 512 KiB (≈6 ms of worker work): while the reader is blocked by one ring, all other rings starve for the whole window (worker idle ~45%) | Queue capacity **1 MiB → 8 MiB**, return queue 1 → 2 MiB; DSM scales with the actual worker count (15 workers ≈ 144 MiB) | **w2 10.59 → 3.46 s (3.06×)**, w4 5.13 → 1.97 s, w8 2.34 → 1.95 s |
 
-最终 1 GiB 热缓存对比（P0 基线 → 单读多解）：w2 **6.82 → 3.46 s（1.97×）**、
-w4 **2.95 → 1.97 s（1.50×）**、w8 2.32 → 1.95 s（1.19×）、w15 2.32 → 2.01 s、
-auto 2.34 → 1.99 s（1.18×）；fl_off / w1 与 P0 等价（串行路径零改动）。
-高并发已饱和于 leader 串行 `WriterInsert`（WRITE ≈ 1.25~1.36 s 下限）。
+Final 1 GiB warm-cache comparison (P0 baseline → single-reader, multi-worker): w2 **6.82 → 3.46 s
+(1.97×)**, w4 **2.95 → 1.97 s (1.50×)**, w8 2.32 → 1.95 s (1.19×), w15 2.32 → 2.01 s,
+auto 2.34 → 1.99 s (1.18×); fl_off / w1 are equivalent to P0 (zero changes to the serial path).
+At high concurrency the leader's serial `WriterInsert` is already saturated (WRITE floor ≈ 1.25~1.36 s).
 
-验证：release + debug 双构建 rc=0；`fastload_verify.py` **90/90 PASS**；
-7 配置内容摘要一致；复测后生产 `.so` 已恢复非 profile 版。
+Verification: release + debug dual build rc=0; `fastload_verify.py` **90/90 PASS**;
+content digests for all 7 configurations match; after re-testing the production `.so` was
+restored to the non-profile build.
 
 ---
 
-## 11. 内核 shm_mq 统一传输 + 冷缓存大块 I/O（2026-11-09 第四轮）
+## 11. Unified Kernel shm_mq Transport + Large-Block Cold-Cache I/O (Round 4, 2026-11-09)
 
-依据：单读多解架构定稿后的阶段耗时分析——reader→worker 仍走自研 SPSC 字节环
-（spinlock + head/tail + 100 µs 退避，约 200 行手写同步代码），与 worker→leader 方向的内核
-shm_mq 形成两套传输实现；冷缓存场景 reader 64 KiB 小块读 + 64 KiB 小块发产生约 3.3 万次阻塞
-系统调用，在本虚拟化宿主上被放大为分钟级回归。
+Basis: stage-timing analysis after the single-reader, multi-worker architecture was finalized—
+reader→worker still went through a hand-rolled SPSC byte ring (spinlock + head/tail + 100 µs
+backoff, ~200 lines of hand-written synchronization code), forming two transport implementations
+alongside the kernel shm_mq in the worker→leader direction; in cold-cache scenarios the reader's
+64 KiB small-block reads + 64 KiB small-block sends produced ~33,000 blocking syscalls, amplified
+into minute-scale regressions on this virtualized host.
 
-| # | 项 | 修改 | 效果 |
+| # | Item | Change | Effect |
 |---|---|---|---|
-| S-1 | reader→worker 自研 SPSC 环替换为内核 shm_mq | 删除 `FastloadRing`（spinlock/head/tail/退避/计数控制），DSM 改为每 worker 一个 8 MiB shm_mq；reader 以 `shm_mq_send` 分帧发送、worker 以 `shm_mq_receive` 接收（整帧同消息零拷贝快路径，跨消息重组）；EOF 语义 = reader 先置 `reader_state=DONE` 再 `shm_mq_detach`，worker 见 `SHM_MQ_DETACHED` 后校验状态区分正常收尾/崩溃 | 净删约 200 行手写同步代码，传输实现与回传方向统一为内核原语；热缓存 w2 3.46→3.33 s、w15 2.01→1.89 s、auto 1.99→1.88 s |
-| S-2 | 冷缓存小块系统调用延迟放大 | `FL_READ_CHUNK` 64 KiB→**1 MiB**（每次载入 16386→1026 次 read）、`FL_STAGE_CAP` 64 KiB→**512 KiB**（17193→2148 次 send）；删除 `FL_DRAIN_CAP`（worker 侧改由 shm_mq 帧边界自然分批） | 阻塞系统调用次数降约 15×；消除冷缓存**系统性**回归（好窗口下 w2 3.0 / w4 1.8 / auto 1.5 s，反超串行 7.1 s，最高 4.9×）；宿主偶发卡顿窗口（vmstat 0 steal / 0 iowait / 100% idle）属 hypervisor 层现象 |
+| S-1 | Replaced the hand-rolled SPSC ring for reader→worker with the kernel shm_mq | Removed `FastloadRing` (spinlock/head/tail/backoff/count control); DSM now allocates one 8 MiB shm_mq per worker; the reader sends framed messages via `shm_mq_send` and the worker receives via `shm_mq_receive` (zero-copy fast path for whole-frame same-message, reassembly across messages); EOF semantics = the reader sets `reader_state=DONE` before `shm_mq_detach`, and the worker checks the state upon seeing `SHM_MQ_DETACHED` to distinguish clean completion from a crash | Net removal of ~200 lines of hand-written synchronization code; transport implementation unified with the return direction on kernel primitives; warm cache w2 3.46→3.33 s, w15 2.01→1.89 s, auto 1.99→1.88 s |
+| S-2 | Magnified latency of cold-cache small-block syscalls | `FL_READ_CHUNK` 64 KiB → **1 MiB** (16386 → 1026 reads per load), `FL_STAGE_CAP` 64 KiB → **512 KiB** (17193 → 2148 sends); removed `FL_DRAIN_CAP` (worker side now batches naturally at shm_mq frame boundaries) | Blocking syscalls reduced ~15×; eliminated the cold-cache **systematic** regression (in good windows w2 3.0 / w4 1.8 / auto 1.5 s, beating the 7.1 s serial time, up to 4.9×); the host's occasional stall windows (vmstat 0 steal / 0 iowait / 100% idle) are a hypervisor-layer phenomenon |
 
-涉及文件：`lib/fastload_worker.c`（reader/worker 传输层重写、FastloadRouter）、
-`lib/fastload_parallel.c`（DSM 布局、profile 摘要去 ring 字段）、
-`include/fastload_parallel.h`（删 `FastloadRing`，`FASTLOAD_KEY_RING_BASE`→`FASTLOAD_KEY_INPUT_BASE`，
-`FASTLOAD_RING_SIZE`→`FASTLOAD_INPUT_MQ_SIZE`）。
+Files involved: `lib/fastload_worker.c` (reader/worker transport layer rewrite, FastloadRouter),
+`lib/fastload_parallel.c` (DSM layout, profile summary drops ring fields),
+`include/fastload_parallel.h` (removed `FastloadRing`, `FASTLOAD_KEY_RING_BASE`→`FASTLOAD_KEY_INPUT_BASE`,
+`FASTLOAD_RING_SIZE`→`FASTLOAD_INPUT_MQ_SIZE`).
 
-验证：release + debug 双构建 rc=0；`fastload_verify.py` **90/90 PASS**；7 配置热缓存内容摘要
-`7375042|9258128314029119699254` 与 GOLDEN 一致；复测后生产 `.so` 恢复非 profile 版。
+Verification: release + debug dual build rc=0; `fastload_verify.py` **90/90 PASS**; the warm-cache
+content digests `7375042|9258128314029119699254` for 7 configurations match GOLDEN; after re-testing
+the production `.so` was restored to the non-profile build.
 
 ---
 
-## 12. BINARY / FIXED 并行化（2026-11-09 第五轮，P-1）
+## 12. BINARY / FIXED Parallelization (Round 5, P-1, 2026-11-09)
 
-背景：并行路径原仅支持 `TYPE=CSV`（`FastloadParallelSupported` 以 `rd->is_csv` 守卫）。
-本轮将 `TYPE=BINARY` 与 `TYPE=FIXED`（两者在 `reader.c` 中映射到同一个定长解析器
-`CreateBinaryParser`，COL 描述 + STRIDE）接入单读多解并行管线。
+Background: the parallel path originally supported only `TYPE=CSV` (guarded by `rd->is_csv` in
+`FastloadParallelSupported`). This round wires `TYPE=BINARY` and `TYPE=FIXED` (both mapped to the
+same fixed-length parser `CreateBinaryParser`, COL descriptor + STRIDE, in `reader.c`) into the
+single-reader, multi-worker parallel pipeline.
 
-| 组件 | 修改 |
+| Component | Change |
 |---|---|
-| `include/reader.h` / `lib/reader.c` | `Reader` 增加 `is_fixed`（idx 0/1 → BINARY/FIXED 均为定长） |
-| `lib/binary.c` + `include/binary.h` | 新增 COL 字段描述符序列化：`BinaryParserGetMeta`（导出 nfield/rec_len/fields）、`BinarySerializedSize`/`BinarySerializeFields`（leader 把 kind/offset/len/nullif 写入 DSM blob）、`BinaryDeserializeFields`（worker 按 kind 从静态 `TYPES[]` 表重建 read 函数指针并分配 work buffer；**函数指针不跨进程传递**） |
-| `include/fastload_parallel.h` | `FastloadParams` 增加 `pmode`（FL_PMODE_CSV/FL_PMODE_FIXED）、`nbinfields`、`rec_stride`；DSM 参数块在 `cols[]` 之后追加定长 blob |
-| `lib/fastload_parallel.c` | 守卫放行 `is_fixed`；fixed 专属回退：无 COL、rec_len≤0、NULLIF 模式长于 64 字节 → 串行；`fastload_fill_params` 序列化 blob |
-| `lib/fastload_worker.c` | ① reader 侧 `fl_reader_scan_fixed`：按 STRIDE 直接切记录（无引号状态机），帧协议/SKIP/LIMIT/分块轮转与 CSV 完全一致；尾残字节 WARNING 忽略（对齐串行）。② worker 侧 `fl_emit_record_fixed`：镜像 `ExtractValuesFromFixed`——scratch 拷贝（队列内存只读）+ 字段尾临时 NUL 终止 + 按序调用 `field->read()`；STRIDE 校验防错 |
+| `include/reader.h` / `lib/reader.c` | `Reader` gains `is_fixed` (idx 0/1 → both BINARY/FIXED are fixed-length) |
+| `lib/binary.c` + `include/binary.h` | New COL field-descriptor serialization: `BinaryParserGetMeta` (exports nfield/rec_len/fields), `BinarySerializedSize`/`BinarySerializeFields` (the leader writes kind/offset/len/nullif into the DSM blob), `BinaryDeserializeFields` (the worker rebuilds read function pointers from the static `TYPES[]` table by kind and allocates a work buffer; **function pointers are not passed across processes**) |
+| `include/fastload_parallel.h` | `FastloadParams` gains `pmode` (FL_PMODE_CSV/FL_PMODE_FIXED), `nbinfields`, `rec_stride`; the DSM parameter block appends a fixed-length blob after `cols[]` |
+| `lib/fastload_parallel.c` | The guard now permits `is_fixed`; fixed-length-only fallbacks: no COL, rec_len≤0, or NULLIF pattern longer than 64 bytes → serial; `fastload_fill_params` serializes the blob |
+| `lib/fastload_worker.c` | ① reader side `fl_reader_scan_fixed`: slices records directly by STRIDE (no quote state machine); frame protocol/SKIP/LIMIT/chunked round-robin identical to CSV; trailing residual bytes WARNING-ignored (aligned with serial). ② worker side `fl_emit_record_fixed`: mirrors `ExtractValuesFromFixed`—scratch copy (queue memory is read-only) + temporary NUL termination at field end + sequential `field->read()` calls; STRIDE validation to prevent errors |
 
-验证：
+Verification:
 
-- 新增 `fastload_verify_fixed.py` **44/44 PASS**：纯 CHAR 文本、BINARY/FIXED 别名、混合文本+二进制
-  数值（INTEGER/BIGINT/DOUBLE 原生字节）、NULLIF（文本+数值）、STRIDE>字段和（尾部填充）、
-  尾残字节、SKIP+LIMIT、PRESERVE_BLANKS+VARCHAR、空文件、w=1/2/3/4/auto、FILTER 降级、
-  10000 行 × 4 worker 分片。
-- CSV 回归 `fastload_verify.py` **90/90 PASS**（无回归）。
-- 1 GiB 定长基准（10,737,418 行 × 100 B，7 配置 × 3 轮热缓存）：内容摘要
-  `10737418|12495206446709334590242` 七配置 ALL_MATCH=True；好窗口 fl_off **1.62 s**、
-  w2 1.06 s、w4 0.94 s、w8 **0.89 s**、w15 0.90 s、auto 0.91 s（相对串行最高 **1.82×**）。
+- New `fastload_verify_fixed.py` **44/44 PASS**: plain CHAR text, BINARY/FIXED aliases, mixed
+  text + binary numerics (INTEGER/BIGINT/DOUBLE native bytes), NULLIF (text + numeric),
+  STRIDE greater than the sum of fields (tail padding), trailing residual bytes, SKIP+LIMIT,
+  PRESERVE_BLANKS+VARCHAR, empty file, w=1/2/3/4/auto, FILTER downgrade, 10000 rows × 4 worker sharding.
+- CSV regression `fastload_verify.py` **90/90 PASS** (no regressions).
+- 1 GiB fixed-length benchmark (10,737,418 rows × 100 B, 7 configurations × 3 warm-cache rounds):
+  content digest `10737418|12495206446709334590242`, ALL_MATCH=True across the seven configurations;
+  in good windows fl_off **1.62 s**, w2 1.06 s, w4 0.94 s, w8 **0.89 s**, w15 0.90 s, auto 0.91 s
+  (up to **1.82×** vs serial).
 
-已知限制（定长并行）：输入编码须与数据库编码一致、FILTER/约束检查/PARSE_BADFILE 降级串行；
-NULLIF 模式长度 ≤ 64 字节；记录必须为完整 STRIDE（尾残忽略）。
+Known limitations (fixed-length parallel): input encoding must match the database encoding;
+FILTER/constraint checks/PARSE_BADFILE downgrade to serial; NULLIF pattern length ≤ 64 bytes;
+records must be complete STRIDEs (trailing residuals ignored).
 
 ---
 
-## 13. 无索引 spool 早退（2026-11-09 第六轮，W-3a）
+## 13. Early Return for Index-Less Spool (Round 6, W-3a, 2026-11-09)
 
-先测量后决策：1 GiB lineitem 在**无索引**下 `WRITER.INDEX` 段仍耗 0.28 s，profile 显示这是一段
-纯空转——`SpoolerInsert()` 无论目标表有无索引，每元组都执行 `ExecStoreHeapTuple()` +
-`GetPerTupleExprContext()` + `IndexSpoolInsert()` 循环（`ri_NumIndices == 0` 时循环体不执行）。
+Measure first, then decide: even with **no index**, 1 GiB lineitem still spent 0.28 s in
+`WRITER.INDEX`, and profiling showed this was pure no-op overhead—`SpoolerInsert()` executes
+`ExecStoreHeapTuple()` + `GetPerTupleExprContext()` + `IndexSpoolInsert()` per tuple regardless of
+whether the target table has an index (when `ri_NumIndices == 0` the loop body does nothing).
 
-修改（`lib/pg_btree.c`）：`SpoolerInsert()` 开头提前解析 `relinfo`，`ri_NumIndices <= 0` 直接 return。
-3 行有效代码，无语义变化（有索引路径逻辑完全不变）。
+Change (`lib/pg_btree.c`): at the top of `SpoolerInsert()`, resolve `relinfo` early and `return`
+directly when `ri_NumIndices <= 0`. Three effective lines of code, no semantic change (the
+indexed-path logic is completely unchanged).
 
-| 配置 | 上一版 | 本轮 | 提升 |
+| Config | Previous | This round | Improvement |
 |---|---|---|---|
 | fl_off | 8.24 s | **7.91 s** | 1.04× |
 | fl_w1 | 8.23 s | **7.86 s** | 1.05× |
@@ -238,76 +256,82 @@ NULLIF 模式长度 ≤ 64 字节；记录必须为完整 STRIDE（尾残忽略�
 | fl_w15 | 1.91 s | **1.73 s** | 1.10× |
 | fl_auto | 1.87 s | **1.75 s** | 1.07× |
 
-验证：`fastload_verify.py` **90/90 PASS**、`fastload_verify_fixed.py` **44/44 PASS**
-（含唯一索引/UPSERT/重复处理用例，零回归）；release + debug 双构建 rc=0。
+Verification: `fastload_verify.py` **90/90 PASS**, `fastload_verify_fixed.py` **44/44 PASS**
+(including unique-index/UPSERT/duplicate-handling cases, zero regressions); release + debug dual
+build rc=0.
 
 ---
 
-## 14. 代码整理（2026-11-09，code review）
+## 14. Code Cleanup (2026-11-09, code review)
 
-对并行子系统做了一次以可维护性为目标的复查，**无行为变化**：
+Performed a maintainability-focused review of the parallel subsystem, **no behavioral changes**:
 
-| 项 | 改动 |
+| Item | Change |
 |---|---|
-| 死字段 | 删除 `FastloadShared.workers_ready`（从未被读取）；删除 `FastloadWorkerId.nworkers`（worker 数一律从 DSM 参数块读取） |
-| 重复逻辑 | worker 数默认值原有两处实现（`ReaderInit()` 内联 `sysconf()` + 编排层），统一为 `FastloadDefaultWorkers()` 单一定义并在 `include/fastload_parallel.h` 导出 |
-| 无用依赖 | 移除 `lib/reader.c` 的 `#include <unistd.h>`（`sysconf()` 移除后不再需要） |
-| 未文档化别名 | 删除 `PARSE_WORKERS` 别名，只保留 `PARALLEL_WORKERS` |
-| 内存 | `reader.c` 重新赋值 `parallel_null` 前先 `pfree` 旧值 |
-| 并发正确性 | `SHM_MQ_DETACHED` 分支先把 `worker_error[i]` 复制到本地缓冲再释放 spinlock，避免把共享内存指针带出临界区 |
-| 组合防护 | `FastloadParallelSupported()` 增加 `MULTI_PROCESS` / `WRITER=PARALLEL` 判定：与 `PARALLEL=ON` 同时指定时不叠加（回退串行 reader 并打印 INFO），避免两个进程扇出套叠 |
-| 注释 | 修正 `fastload_worker.c` 中 SKIP/LIMIT 路由注释的错位；`t_start/t_end` 收进 `#ifdef ENABLE_FASTLOAD_PROFILE` |
-| 生成物 | 删除仓库内遗留的 `lib/exports.list`（由 Makefile 从 `exports.txt` 生成，已在 `.gitignore`） |
+| Dead fields | Removed `FastloadShared.workers_ready` (never read); removed `FastloadWorkerId.nworkers` (worker count is always read from the DSM parameter block) |
+| Duplicated logic | The default worker count had two implementations (`sysconf()` inlined in `ReaderInit()` + in the orchestration layer); unified into a single `FastloadDefaultWorkers()` definition, exported in `include/fastload_parallel.h` |
+| Unused dependency | Removed `#include <unistd.h>` from `lib/reader.c` (no longer needed after `sysconf()` was removed) |
+| Undocumented alias | Removed the `PARSE_WORKERS` alias, keeping only `PARALLEL_WORKERS` |
+| Memory | `reader.c` now `pfree`s the old value before reassigning `parallel_null` |
+| Concurrency correctness | In the `SHM_MQ_DETACHED` branch, `worker_error[i]` is copied to a local buffer before releasing the spinlock, avoiding passing a shared-memory pointer out of the critical section |
+| Combination guard | `FastloadParallelSupported()` adds `MULTI_PROCESS` / `WRITER=PARALLEL` checks: when specified together with `PARALLEL=ON` they do not stack (falls back to a serial reader and prints INFO), avoiding nested fan-out of two process models |
+| Comments | Fixed the misplaced SKIP/LIMIT routing comments in `fastload_worker.c`; moved `t_start/t_end` under `#ifdef ENABLE_FASTLOAD_PROFILE` |
+| Build artifact | Removed the legacy `lib/exports.list` in the repo (generated by Makefile from `exports.txt`, already in `.gitignore`) |
 
-回归：release + debug 双构建 rc=0（仅上游 `TYPES`/`ALIASES` 两条声明风格警告）；
-CSV **90/90 PASS**、定长 **44/44 PASS**、`MULTI_PROCESS` 专项探针 **8/8 PASS**；
-1 GiB 7 配置内容摘要 `7375042|9258128314029119699254` ALL_MATCH=True。
-复测（3 轮中位）：fl_off 7.99 s、fl_w1 7.97 s、fl_w2 3.52 s、fl_w4 1.92 s、
-fl_w8 1.76 s、fl_w15 1.74 s、fl_auto 1.76 s，与上一轮差异在 ±5% 运行间波动内。
+Regression: release + debug dual build rc=0 (only two upstream declaration-style warnings for
+`TYPES`/`ALIASES`); CSV **90/90 PASS**, fixed-length **44/44 PASS**, `MULTI_PROCESS` dedicated
+probe **8/8 PASS**; 1 GiB 7-configuration content digest
+`7375042|9258128314029119699254` ALL_MATCH=True. Re-test (median of 3 rounds): fl_off 7.99 s,
+fl_w1 7.97 s, fl_w2 3.52 s, fl_w4 1.92 s, fl_w8 1.76 s, fl_w15 1.74 s, fl_auto 1.76 s, within the
+±5% run-to-run fluctuation vs the previous round.
 
 ---
 
-## 15. 文档体系重构（2026-11-09）
+## 15. Documentation System Restructuring (2026-11-09)
 
-| 改动 | 说明 |
+| Change | Description |
 |---|---|
-| 新增中英 README | `README.md` / `README.en.md`：定位、与 pg_bulkload 三张差异表（设计思路 / 功能特性 / 使用方式）、架构图与组件职责、快速开始、降级清单、限制 |
-| 新增中英用户手册 | `docs/USER_MANUAL.md` / `.en.md`：安装、控制文件语法、关键字全表、SQL/CLI、输入格式、并行调优、错误处理、诊断、FAQ、迁移与卸载 |
-| 架构文档中英双版 | `docs/ARCHITECTURE.md` / `.en.md` 合并原 `PARALLEL_DESIGN.md` 内容并重写，追加架构图与组件职责表；删除 `PARALLEL_DESIGN.md` |
-| 架构图 | 新增 `docs/img/architecture.svg`（英）与 `architecture.zh-CN.svg`（中），与现行单读多解实现一致 |
-| 删除日文与遗留 HTML | 删除 `index_ja.html`、`pg_fastload-ja.html`、`pg_timestamp-ja.html` 及上游英文 HTML 手册（见 §4） |
-| 文档归并 | 优化记录集中到 `docs/OPTIMIZATION.md`：正文按「已采纳」逐轮记录，评估后未采纳的方案集中在末章，不在本文逐轮出现 |
+| New README (now in English and Chinese) | `README.md` / `README.zh-CN.md`: positioning, three difference tables vs. pg_bulkload (design approach / features / usage), architecture diagram and component responsibilities, quick start, downgrade list, limitations |
+| New user manual (now in English and Chinese) | `docs/USER_MANUAL.md` / `docs/USER_MANUAL.zh-CN.md`: installation, control-file syntax, full keyword table, SQL/CLI, input formats, parallel tuning, error handling, diagnostics, FAQ, migration and uninstallation |
+| Architecture docs (English and Chinese) | `docs/ARCHITECTURE.md` / `docs/ARCHITECTURE.zh-CN.md` merge and rewrite the original `PARALLEL_DESIGN.md` content, adding an architecture diagram and component-responsibility table; `PARALLEL_DESIGN.md` removed |
+| Architecture diagram | New `docs/img/architecture.svg` (English) and `docs/img/architecture.zh-CN.svg` (Chinese), consistent with the current single-reader, multi-worker implementation |
+| Removed Japanese and legacy HTML | Removed `index_ja.html`, `pg_fastload-ja.html`, `pg_timestamp-ja.html`, and the upstream English HTML manual (see §4) |
+| Documentation consolidation | Optimization records consolidated into `docs/OPTIMIZATION.md`: the body records adopted changes round-by-round, and evaluated-but-rejected approaches are collected in the final chapter, not appearing round-by-round in this document |
 
 ---
 
-## 16. 多版本适配 PG 15 / 16 / 17 / 19（2026-11-10）
+## 16. Multi-Version Adaptation for PG 15 / 16 / 17 / 19 (2026-11-10)
 
-目标：同一份源码在 15.19 / 16.15 / 17.11 / 18.6 / 19rc1 上编译并通过同一套功能验收。
-版本差异全部用 `#if PG_VERSION_NUM` 收敛，不做业务代码分叉。
+Goal: a single source tree compiles and passes the same functional acceptance on 15.19 / 16.15 /
+17.11 / 18.6 / 19rc1. All version differences are folded into `#if PG_VERSION_NUM`; no
+business-logic forks.
 
-| 文件 | 改动 |
+| File | Change |
 |---|---|
-| `lib/fastload_worker.c` | `populate_compact_attribute()` 仅 ≥18 调用（18 新增，早期版本按需计算） |
-| `lib/fastload_parallel.c` | `get_database_name()` 头文件按版本选择（19 移到 `utils/lsyscache.h`）；补 `storage/proc.h`（`MyProc`） |
-| `lib/writer_parallel.c` | 同上，`get_database_name()` 头文件按版本选择 |
-| `lib/pgut/pgut-be.h` | 新增 `FastloadBackendNumber` / `FastloadInvalidBackend`：≥17 用 `MyProcNumber` / `INVALID_PROC_NUMBER`（19 移除了 `MyBackendId`），更早用 `MyBackendId` / `InvalidBackendId` |
-| `lib/pg_btree.c` | 临时关系定位改用上述宏（同时修正 17 分支误用 `MyBackendType` / `InvalidCommandId` 的问题）；索引构建分支接入 `nbtsort-19.c` |
-| `lib/writer_direct.c` | 同上宏；≥19 `PageAddItem()` 直接传 `const void *`（`Item` typedef 已删除）、`PageSetChecksumInplace()` → `PageSetChecksum()` |
-| `lib/pg_strutil.c` | ≥19 `FuncnameGetCandidates()` 新增 `int *fgc_flags` 出参，且**无条件解引用**，改传一次性 `int[1]` 复合字面量（传 `NULL` 实测段错误） |
-| `lib/nbtree/nbtsort-19.c` | 新增：PG19 的 `nbtsort.c`（`BTSpool` 已私有化、`palloc*_object` 等），与 18 版差 59 行 |
-| `bin/pgut/pgut-list.h` | ≥19 补 `typedef uint64_t Datum;`（`Datum` 从 `c.h` 移入 `postgres.h`，前端不可用） |
-| `bin/recovery.c` | ≥19 `pd_lsn` 改用 `PageXLogRecPtrGet()`（`PageXLogRecPtr` 变单 64 位值） |
-| `util/fl_ver_test.sh` | 新增：单主版本功能验收脚本（9 类断言），`PG_PREFIX` / `SRC` / `ROWS` 可覆盖 |
-| `docs/PORTING.md` / `.en.md` | 新增：支持矩阵、10 条内核差异与处理、验收方法与结果 |
+| `lib/fastload_worker.c` | `populate_compact_attribute()` is called only for ≥18 (new in 18; earlier versions compute on demand) |
+| `lib/fastload_parallel.c` | `get_database_name()` header selected by version (moved to `utils/lsyscache.h` in 19); added `storage/proc.h` (`MyProc`) |
+| `lib/writer_parallel.c` | Same as above, `get_database_name()` header selected by version |
+| `lib/pgut/pgut-be.h` | New `FastloadBackendNumber` / `FastloadInvalidBackend`: for ≥17 use `MyProcNumber` / `INVALID_PROC_NUMBER` (19 removed `MyBackendId`), earlier versions use `MyBackendId` / `InvalidBackendId` |
+| `lib/pg_btree.c` | Temp-relation lookup switched to the above macros (also fixing the 17 branch's misuse of `MyBackendType` / `InvalidCommandId`); the index-build branch hooks into `nbtsort-19.c` |
+| `lib/writer_direct.c` | Same macros; for ≥19 `PageAddItem()` passes `const void *` directly (`Item` typedef removed), `PageSetChecksumInplace()` → `PageSetChecksum()` |
+| `lib/pg_strutil.c` | For ≥19 `FuncnameGetCandidates()` gained an `int *fgc_flags` out-parameter and **unconditionally dereferences** it, so we pass a one-shot `int[1]` compound literal (passing `NULL` caused a segfault in testing) |
+| `lib/nbtree/nbtsort-19.c` | New: PG19's `nbtsort.c` (`BTSpool` was privatized, `palloc*_object`, etc.), differing from the 18 version by 59 lines |
+| `bin/pgut/pgut-list.h` | For ≥19 added `typedef uint64_t Datum;` (`Datum` moved from `c.h` into `postgres.h`, unavailable to the frontend) |
+| `bin/recovery.c` | For ≥19 `pd_lsn` uses `PageXLogRecPtrGet()` (`PageXLogRecPtr` became a single 64-bit value) |
+| `util/fl_ver_test.sh` | New: single-major-version functional acceptance script (9 assertion classes), with overridable `PG_PREFIX` / `SRC` / `ROWS` |
+| `docs/PORTING.md` (English) / `docs/PORTING.zh-CN.md` (Chinese) | New: support matrix, 10 kernel differences and their handling, acceptance method and results |
 
-验收（四个版本各跑一遍，全部 PASS）：CSV 串行/并行 5 配置摘要一致、定长 3 配置摘要一致、
-`FILTER` 降级内容一致且 `LOGFILE` 有 `PARALLEL disabled (FILTER` 提示、解析错误默认停在第 1 条
-坏记录而 `PARSE_ERRORS=2` 保留 2 条好记录、CLI 退出码 0 且装载 200,000 行、服务端日志无 PANIC。
+Acceptance (run once per version, all PASS): CSV serial/parallel 5-configuration digests match,
+fixed-length 3-configuration digests match, `FILTER` downgrade content matches and `LOGFILE`
+carries the `PARALLEL disabled (FILTER` message, parse errors stop at the 1st bad record by
+default while `PARSE_ERRORS=2` keeps 2 good records, CLI exit code 0 with 200,000 rows loaded, no
+PANIC in the server log.
 
-顺带修正：用户手册 `PARSE_ERRORS` 的描述原为"超过则装载失败"，实际是**超过即停止读取并正常返回**
-（已装载行保留，日志给 `Maximum parse error count exceeded`），中英文两版已改。
+Incidental fix: the user manual's `PARSE_ERRORS` description originally read "loading fails if
+exceeded", but in fact it **stops reading and returns normally once exceeded** (loaded rows are
+kept, log shows `Maximum parse error count exceeded`); both the original Chinese and English
+versions were corrected.
 
 ---
 
-*未采纳方案汇总见 [OPTIMIZATION.md](OPTIMIZATION.md#八未采纳方案汇总)；性能数据见
-[BENCHMARK.md](BENCHMARK.md)；验证结论见 [VERIFICATION.md](VERIFICATION.md)。*
+*A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

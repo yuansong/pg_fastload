@@ -1,46 +1,46 @@
-# pg_fastload 性能基准
+# pg_fastload Performance Benchmark
 
-> 环境：VM 16 vCPU（Intel i7-13700KF）/ 7.3 GiB 内存，Oracle Linux 10.1，
-> PostgreSQL 18.6 release（`REL_18_STABLE`，HEAD `1da6ddbdc3`），`PGDATA=/tmp/pgdata`、`port=5433`、库 `tpcc`。
-> 测量日期：2026-11-08 ~ 2026-11-10。
+> Environment: VM with 16 vCPUs (Intel i7-13700KF) / 7.3 GiB RAM, Oracle Linux 10.1,
+> PostgreSQL 18.6 release (`REL_18_STABLE`, HEAD `1da6ddbdc3`), `PGDATA=/tmp/pgdata`, `port=5433`, database `tpcc`.
+> Measurement dates: 2026-11-08 ~ 2026-11-10.
 >
-> 本文分两部分：**第 3~6 节是当前版本（单读多解 + 全部优化）的结果**，其中第 4 节单独给出
-> `TYPE=BINARY` 与 `TYPE=FIXED` 的对比（2026-11-10 补测）；第 7 节保留与上游
-> `pg_bulkload 3.1.23` 的同条件对比，那组数据测于首版（N 个进程各自全量扫描），仅用于说明串行路径等价性与
-> 并行扩展性的历史基线。
+> This document is in two parts: **Sections 3–6 present results for the current version (single-read, multi-decode + all optimizations)**, where Section 4 separately provides
+> the `TYPE=BINARY` vs `TYPE=FIXED` comparison (re-tested on 2026-11-10); Section 7 retains the same-condition comparison with upstream
+> `pg_bulkload 3.1.23`, whose data was measured in the first version (N processes each doing a full scan), used only to illustrate serial-path equivalence and
+> the historical baseline for parallel scalability.
 
 ---
 
-## 1. 数据集
+## 1. Dataset
 
-| 名称 | 文件 | 规模 | 结构 |
+| Name | File | Size | Structure |
 |---|---|---|---|
-| CSV 1 GiB | `/tmp/tpch/lineitem.csv` | 1 GiB / 7,375,042 行 / 16 列 | TPC-H lineitem，纯逗号分隔，无引号 |
-| 定长 1 GiB | `/tmp/tpch/fixed1g.bin` | 1 GiB / 10,737,418 行 | 每行 100 B：`CHAR(16)` + `INTEGER(4)` + `BIGINT(8)` + `DOUBLE(8)` + `CHAR(64)`，原生二进制字段镜像 |
-| 小/中/大三档（历史对比） | `/tmp/tpcc/order_line.csv` 子集 | 1M 行 / 77 MB、8M 行 / 640 MB、32M 行 / 2.5 GiB | TPC-C order_line，10 列 |
+| CSV 1 GiB | `/tmp/tpch/lineitem.csv` | 1 GiB / 7,375,042 rows / 16 columns | TPC-H lineitem, plain comma-separated, no quoting |
+| Fixed-length 1 GiB | `/tmp/tpch/fixed1g.bin` | 1 GiB / 10,737,418 rows | 100 B per row: `CHAR(16)` + `INTEGER(4)` + `BIGINT(8)` + `DOUBLE(8)` + `CHAR(64)`, native binary field mirror |
+| Small / medium / large tiers (historical comparison) | `/tmp/tpcc/order_line.csv` subset | 1M rows / 77 MB, 8M rows / 640 MB, 32M rows / 2.5 GiB | TPC-C order_line, 10 columns |
 
-## 2. 测量方法与公平性控制
+## 2. Measurement Method and Fairness Controls
 
-| 控制项 | 做法 |
+| Control | Approach |
 |---|---|
-| 目标表 | 每阶段 `CREATE TABLE t_bench_cmp (LIKE public.order_line)`，每轮 `TRUNCATE`（**独立会话**，不与装载同会话） |
-| 输入 | 所有配置使用**同一个文件**；`TYPE`、`WRITER=DIRECT`、`LOGFILE` 目录一致 |
-| 计时口径 | 以扩展日志中的**服务端 elapsed** 为主指标，wall 作辅助 |
-| 缓存状态 | 热缓存：每轮前 `cat CSV > /dev/null` 预热；冷缓存：`posix_fadvise(DONTNEED)` 精确丢弃该文件的 clean page（免 root），并读 `/proc/meminfo` 的 `Cached` 确认 |
-| 顺序偏差 | 多轮采用正序 / 倒序轮换，取**中位数** |
-| checkpoint 干扰 | `CHECKPOINT` 在**计时之外**执行——否则上一轮脏页刷盘会落入下一轮，曾造出 5.58× 的假加速比 |
-| 内容正确性 | `count(*) \|\| sum(hash_record_extended(t,0))`，与物理插入顺序无关 |
-| 等价性锚点 | `PARALLEL=OFF` 应与上游耗时一致，用于识别环境抖动 |
-| 索引 | 除非特别说明，基准表**无索引**（W-3a 的收益正来自此场景） |
+| Target table | Each phase `CREATE TABLE t_bench_cmp (LIKE public.order_line)`, each round `TRUNCATE` (**separate session**, not the same session as the load) |
+| Input | All configurations use the **same file**; `TYPE`, `WRITER=DIRECT`, and `LOGFILE` directories are identical |
+| Timing metric | Server-side **elapsed** from the extension log as the primary metric, wall-clock as secondary |
+| Cache state | Warm cache: `cat CSV > /dev/null` warm-up before each round; cold cache: `posix_fadvise(DONTNEED)` to precisely drop the file's clean pages (no root needed), and read `Cached` from `/proc/meminfo` to confirm |
+| Ordering bias | Multiple rounds alternate forward / reverse order, take the **median** |
+| CHECKPOINT interference | `CHECKPOINT` is run **out-of-timing** — otherwise the previous round's dirty-page flush would fall into the next round, which once produced a false speedup of 5.58× |
+| Content correctness | `count(*) \|\| sum(hash_record_extended(t,0))`, independent of physical insertion order |
+| Equivalence anchor | `PARALLEL=OFF` should match upstream timing, used to identify environment jitter |
+| Index | Unless otherwise specified, the benchmark table has **no index** (the gain from W-3a comes precisely from this scenario) |
 
-配置集合：`fl_off`（`PARALLEL=OFF`，串行控制）、`fl_w1`、`fl_w2`、`fl_w4`、`fl_w8`、`fl_w15`、
-`fl_auto`（未指定 `PARALLEL_WORKERS`，16 核 → 15）。
+Configuration set: `fl_off` (`PARALLEL=OFF`, serial control), `fl_w1`, `fl_w2`, `fl_w4`, `fl_w8`, `fl_w15`,
+`fl_auto` (no `PARALLEL_WORKERS` specified, 16 cores → 15).
 
 ---
 
-## 3. 当前版本：1 GiB CSV（热缓存，3 轮中位）
+## 3. Current Version: 1 GiB CSV (Warm Cache, Median of 3 Rounds)
 
-| 配置 | r1 | r2 | r3 | **中位** | 相对串行 | 相对首版 |
+| Config | r1 | r2 | r3 | **Median** | vs Serial | vs First Version |
 |---|---|---|---|---|---|---|
 | `fl_off` | 8.02 | 7.99 | 7.98 | **7.99 s** | 1.00× | 1.03× |
 | `fl_w1` | 8.00 | 7.97 | 7.97 | **7.97 s** | 1.00× | 2.03× |
@@ -50,164 +50,152 @@
 | `fl_w15` | 1.74 | 1.74 | 31.83\* | **1.74 s** | 4.59× | 1.32× |
 | `fl_auto` | 1.76 | 19.19\* | 1.71 | **1.76 s** | 4.54× | 1.32× |
 
-\* 宿主 hypervisor 层的偶发卡顿轮次（详见 §5 说明），取中位时自动被排除。
+\* Occasional host hypervisor jitter round (see §5 for details), automatically excluded when taking the median.
 
-**内容校验**：7 个配置的摘要全部为 `7375042|9258128314029119699254`（`ALL_MATCH = True`）。
+**Content verification**: The digests for all 7 configurations are `7375042|9258128314029119699254` (`ALL_MATCH = True`).
 
-**分段 profile（`USE_PROFILE=1`）**：
+**Segmented profile (`USE_PROFILE=1`)**:
 
-| 配置 | GLOBAL | PARALLEL{COPY, READ, SETUP, WAIT, WRITE} | WORKER{FORM, IPC, SCAN} |
+| Config | GLOBAL | PARALLEL{COPY, READ, SETUP, WAIT, WRITE} | WORKER{FORM, IPC, SCAN} |
 |---|---|---|---|
-| `fl_w1` | 7.985 s | 全 0（走串行路径） | 全 0 |
+| `fl_w1` | 7.985 s | all 0 (serial path) | all 0 |
 | `fl_w2` | 3.519 s | COPY 0.178 / READ 3.435 / WAIT 2.169 / WRITE 1.125 | FORM 5.654 / IPC 0.728 / SCAN 0.530 |
 | `fl_w4` | 1.915 s | COPY 0.204 / READ 1.827 / WAIT 0.491 / WRITE 1.176 | FORM 5.796 / IPC 1.206 / SCAN 0.378 |
 | `fl_auto` | 1.761 s | COPY 0.183 / READ 1.554 / WAIT 0.350 / WRITE 1.152 | FORM 6.452 / IPC 17.206 / SCAN 1.358 |
 
-解读：
+Interpretation:
 
-- `WRITE ≈ 1.15 s` 几乎不随 worker 数变化——这正是 leader 串行 `WriterInsert` 的下限；
-- `WORKER` 组是**各 worker 时间之和**（跨进程累加），因此 `FORM 6.45 s` 在 15 worker 下
-  对应每 worker ≈0.43 s，不是关键路径；
-- `WAIT` 随 worker 数下降（w2 2.17 s → auto 0.35 s），说明 w2 时 leader 在等数据，
-  auto 时 leader 在等自己的写入。
+- `WRITE ≈ 1.15 s` barely changes with the number of workers — this is precisely the floor of the leader's serial `WriterInsert`;
+- The `WORKER` group is the **sum of each worker's time** (accumulated across processes), so `FORM 6.45 s` with 15 workers corresponds to ≈0.43 s per worker and is not on the critical path;
+- `WAIT` decreases as the worker count grows (w2 2.17 s → auto 0.35 s), indicating that at w2 the leader is waiting for data, while at auto the leader is waiting on its own writes.
 
 ---
 
-## 4. 定长输入：`TYPE=BINARY` 与 `TYPE=FIXED` 对比（1 GiB，热缓存）
+## 4. Fixed-Length Input: `TYPE=BINARY` vs `TYPE=FIXED` (1 GiB, Warm Cache)
 
-### 4.1 为什么两者应当同速
+### 4.1 Why the Two Should Run at the Same Speed
 
-`TYPE=BINARY` 与 `TYPE=FIXED` 在 `ReaderCreate()` 里映射到**同一个解析器**
-（`CreateBinaryParser()`，索引 0 与 1），`FIXED` 是沿用 pg_bulkload 的历史别名。
-两者都是"定长记录、字段按 `COL=类型(长度)` 声明的原生二进制镜像"，
-**不是** PostgreSQL `COPY ... WITH (FORMAT binary)` 的二进制流格式。
-既然解析器、切分逻辑与并行路由完全相同，两者的实测耗时应落在运行间噪声内——
-这正是本节要验证的事。
+`TYPE=BINARY` and `TYPE=FIXED` map to the **same parser** in `ReaderCreate()` (`CreateBinaryParser()`, indices 0 and 1); `FIXED` is the historical alias carried over from pg_bulkload.
+Both are "fixed-length records, native binary mirrors with fields declared by `COL=type(length)`",
+**not** the binary stream format of PostgreSQL `COPY ... WITH (FORMAT binary)`.
+Since the parser, splitting logic, and parallel routing are completely identical, the measured timings of the two should fall within run-to-run noise — which is exactly what this section verifies.
 
-### 4.2 数据集与字段映射
+### 4.2 Dataset and Field Mapping
 
-| 项 | 值 |
+| Item | Value |
 |---|---|
-| 文件 | `/tmp/tpch/fixed1g.bin`，1,073,741,800 字节 |
-| 规模 | 10,737,418 条 × 100 字节 |
-| 记录结构 | `CHAR(16)` + `INTEGER(4)` + `BIGINT(8)` + `DOUBLE(8)` + `CHAR(64)` |
-| 目标表 | `public.t_bench_bf (c1 text, c2 integer, c3 bigint, c4 double precision, c5 text)`，**无索引** |
-| 内容分布 | 首字段 `row%013d` 递增；整型/浮点按 `i%1000000`、`i*7919`、`i/7.0` 生成；末字段为 `a`–`z` 轮转 |
+| File | `/tmp/tpch/fixed1g.bin`, 1,073,741,800 bytes |
+| Size | 10,737,418 records × 100 bytes |
+| Record structure | `CHAR(16)` + `INTEGER(4)` + `BIGINT(8)` + `DOUBLE(8)` + `CHAR(64)` |
+| Target table | `public.t_bench_bf (c1 text, c2 integer, c3 bigint, c4 double precision, c5 text)`, **no index** |
+| Content distribution | First field increments as `row%013d`; integer/float generated by `i%1000000`, `i*7919`, `i/7.0`; last field cycles through `a`–`z` |
 
-### 4.3 测量方法
+### 4.3 Measurement Method
 
-与 §2 完全一致，便于和 CSV 结果横向比较：`WRITER=DIRECT`；每轮计时外 `CHECKPOINT`；
-输入文件先 `cat > /dev/null` 预热；`TRUNCATE` 在独立会话执行；正序/倒序轮换抵消漂移；
-取**中位数**；每配置装载后算 `count(*) || sum(hash_record_extended(t,0))` 校验内容。
+Identical to §2, to allow horizontal comparison with CSV results: `WRITER=DIRECT`; out-of-timing `CHECKPOINT` each round; input file warmed up with `cat > /dev/null` first; `TRUNCATE` in a separate session; forward/reverse alternation to cancel drift; take the **median**; after each configuration's load, compute `count(*) || sum(hash_record_extended(t,0))` to verify content.
 
-驱动脚本：`bench_binary_fixed.py`（`BINARY` 3 轮、`FIXED` 3 轮）。
+Driver script: `bench_binary_fixed.py` (3 rounds of `BINARY`, 3 rounds of `FIXED`).
 
-### 4.4 结果（2026-11-10，PostgreSQL 18.6，16 vCPU）
+### 4.4 Results (2026-11-10, PostgreSQL 18.6, 16 vCPU)
 
-| 配置 | `TYPE=BINARY` | `TYPE=FIXED` | 两者之差 | 相对串行（BINARY） |
+| Config | `TYPE=BINARY` | `TYPE=FIXED` | Difference | vs Serial (BINARY) |
 |---|---|---|---|---|
 | `fl_off` | 1.59 s | 1.60 s | +0.6% | 1.00× |
-| `fl_w1` | 1.61 s | 1.61 s | 0% | 0.99×（串行回退，语义正确） |
+| `fl_w1` | 1.61 s | 1.61 s | 0% | 0.99× (serial fallback, semantically correct) |
 | `fl_w2` | 1.07 s | 1.07 s | 0% | 1.49× |
 | `fl_w4` | 0.91 s\* | 0.91 s | 0% | 1.75× |
 | `fl_w8` | **0.87 s** | **0.86 s** | −1.1% | **1.83×** |
 | `fl_w15` | 0.89 s | 0.88 s | −1.1% | 1.79× |
 | `fl_auto` | 0.89 s | 0.88 s | −1.1% | 1.79× |
 
-\* `BINARY` 的 `fl_w4` 首轮两次撞上宿主卡顿（31 s），该格单独补测 6 轮：5 轮落在
-0.89–0.91 s，另 1 轮 31 s，取中位 0.91 s（原始值见 `bench_bf_w4.json`）；其余格子为 3 轮中位。
+\* The first round of `BINARY`'s `fl_w4` hit host jitter twice (31 s); that cell was re-tested separately for 6 rounds: 5 rounds landed in 0.89–0.91 s, the other 1 round at 31 s, median taken as 0.91 s (raw values in `bench_bf_w4.json`); the remaining cells are medians of 3 rounds.
 
-**结论一：两者等价。** 7 个配置的最大差异 1.1%，落在运行间噪声内；内容摘要 14/14 全部为
-`10737418|12495206446709334590242`（`ALL_MATCH = True`）。
-`TYPE=FIXED` 可以当作 `TYPE=BINARY` 的别名使用，反之亦然。
+**Conclusion 1: The two are equivalent.** The maximum difference across the 7 configurations is 1.1%, within run-to-run noise; content digests 14/14 are all
+`10737418|12495206446709334590242` (`ALL_MATCH = True`).
+`TYPE=FIXED` can be used as an alias for `TYPE=BINARY`, and vice versa.
 
-**结论二：并行加速比按"可并行 CPU 占比"收窄。** 定长串行只要 1.59 s，而 CSV 串行要 7.99 s
-（§3）——定长没有引号状态机、数值直接 C-cast、按固定偏移切分。装载 1 GiB 的固定开销
-（读文件、写堆页、leader 串行 `WriterInsert`）占比因此更大，加速比从 CSV 的 4.5× 降到 1.83×，
-但**绝对时间仍是 CSV 的 1/2**（w8：0.87 s vs 1.76 s）。
+**Conclusion 2: The parallel speedup narrows according to the "parallelizable CPU share."** Fixed-length serial needs only 1.59 s, while CSV serial needs 7.99 s
+(§3) — fixed-length has no quoting state machine, values are directly C-cast, and splitting is by fixed offset. The fixed overhead of loading 1 GiB (reading the file, writing heap pages, leader serial `WriterInsert`) therefore accounts for a larger share, so the speedup drops from 4.5× for CSV to 1.83×,
+but the **absolute time is still 1/2 of CSV's** (w8: 0.87 s vs 1.76 s).
 
-**轮次噪声**：本次 42 个计时单元里有 5 个被宿主 hypervisor 层的 19–31 s 卡顿污染（串行与
-并行都有，与该配置无关），全部被中位数剔除；被判为污染的轮次在 `bench_binary_fixed.json`
-里保留原始值，便于复核。
+**Round noise**: Of the 42 timing units this run, 5 were polluted by 19–31 s host hypervisor jitter (both serial and
+parallel, unrelated to the configuration); all were removed by the median; the rounds judged as polluted retain their raw values in `bench_binary_fixed.json`
+for review.
 
 ---
 
-## 5. 冷缓存（`posix_fadvise` 逐出 1 GiB CSV）
+## 5. Cold Cache (`posix_fadvise` Eviction of 1 GiB CSV)
 
-| 配置 | 各轮 elapsed | 好窗口中位 | 相对串行 |
+| Config | Elapsed per Round | Clean Run Window Median | vs Serial |
 |---|---|---|---|
-| `fl_off`（串行） | 7.07 / 7.14 / 7.20 | 7.14 s | 1.00× |
+| `fl_off` (serial) | 7.07 / 7.14 / 7.20 | 7.14 s | 1.00× |
 | `fl_w2` | 3.02 / 3.31 / 30.6\* | **3.02 s** | 2.36× |
 | `fl_w4` | 1.78 / 1.86 / 41.2\* | **1.82 s** | 3.92× |
 | `fl_auto` | 1.51 / 1.58 / 62.4\* | **1.55 s** | 4.61× |
 
-\* 宿主层卡顿轮次。
+\* Host-layer jitter round.
 
-**关于残留卡顿**：并行配置仍随机出现 11~62 s 的轮次。诊断结论（vmstat 逐秒采样、`dd` 探针、
-多轮 cold_diag）是——卡顿窗口内 guest 的 `steal` 为 0、`iowait` 为 0、CPU 100% idle，
-读总量与带宽均正常，即宿主/hypervisor 对**阻塞系统调用**的延迟放大（单次调用被放大到 ~1.85 ms）。
-串行路径用 stdio 大块 `fread`，系统调用次数少约 500×，因此基本免疫。
+**On residual jitter**: Parallel configurations still randomly show rounds of 11~62 s. The diagnosis (per-second vmstat sampling, `dd` probes,
+multiple cold_diag runs) is — within the jitter window the guest's `steal` is 0, `iowait` is 0, CPU 100% idle,
+total read volume and bandwidth are normal, i.e. the host/hypervisor amplifies the latency of **blocking syscalls** (a single call amplified to ~1.85 ms).
+The serial path uses stdio bulk `fread`, with about 500× fewer syscalls, and is therefore largely immune.
 
-代码侧能消除的**系统性**成分已消除：S-2 之前每次装载 16386 次 read + 17193 次 send，之后
-1026 + 2148（约 15× 减少）。修复前 100% 冷缓存并行轮次受累，修复后仅随机窗口受累，
-好窗口下并行**反超串行最高 4.9×**。这是「1× 读」设计的核心收益：首版 N× 扫描在本场景
-比串行慢 6.49×。
+The **systematic** component that can be eliminated on the code side has been eliminated: before S-2, each load did 16386 reads + 17193 sends; after,
+1026 + 2148 (~15× reduction). Before the fix, 100% of cold-cache parallel rounds suffered; after the fix, only random windows suffer,
+and within the clean run window parallel **overtakes serial by up to 4.9×**. This is the core benefit of the "1× read" design: the first version's N× scan was 6.49× slower than serial in this scenario.
 
 ---
 
-## 6. 与上游 pg_bulkload 3.1.23 的同条件对比（首版测量，历史基线）
+## 6. Same-Condition Comparison with Upstream pg_bulkload 3.1.23 (First-Version Measurement, Historical Baseline)
 
-> 该组数据测得于 v1.0.0 首版（N 个 worker 各自全量扫描）。保留它的目的是
-> ① 证明 `PARALLEL=OFF` 与上游严格等价；② 说明并行扩展性的历史基线。
-> 当前版本在这些规模上的数字应优于下表（见第 3 节同一文件 1 GiB 的对比）。
+> This data was measured in the v1.0.0 first version (N workers each doing a full scan). It is retained to ① prove that `PARALLEL=OFF` is strictly equivalent to upstream; ② illustrate the historical baseline for parallel scalability.
+> The current version's numbers at these sizes should beat the table below (see Section 3 for the same-file 1 GiB comparison).
 
-### 6.1 热缓存
+### 6.1 Warm Cache
 
-| 数据规模 | 上游 pg_bulkload | pg_fastload OFF | pg_fastload auto(=15) | 加速比（对上游） |
+| Data Size | Upstream pg_bulkload | pg_fastload OFF | pg_fastload auto(=15) | Speedup (vs Upstream) |
 |---|---|---|---|---|
-| 1M 行 / 77 MB | 0.530 s | 0.530 s | 0.220 s | 2.41× |
-| 8M 行 / 640 MB | 4.070 s | 4.110 s | 1.440 s | 2.83× |
-| 32M 行 / 2.5 GiB（稳态） | 16.180 s | 16.325 s | 5.740 s | 2.82× |
+| 1M rows / 77 MB | 0.530 s | 0.530 s | 0.220 s | 2.41× |
+| 8M rows / 640 MB | 4.070 s | 4.110 s | 1.440 s | 2.83× |
+| 32M rows / 2.5 GiB (steady state) | 16.180 s | 16.325 s | 5.740 s | 2.82× |
 
-- `PARALLEL=OFF` 与上游严格等价（0.530 vs 0.530、4.110 vs 4.070、16.325 vs 16.180），
-  更名与代码整理未引入串行回归；差异在 ±1.5% 内。
-- `w≤2` 在当时为负收益（0.36~0.74×），盈亏平衡点在 `w=4` 附近；`w=8→15` 趋于饱和——
-  ④ 串行 `WriterInsert` 成为瓶颈，16 核不会带来 16×。
-- 32M 行首轮上游出现 46.57 s 的冷启动异常；用 `CHECKPOINT` 隔离后的 4 轮稳态
-  16.13~16.25 s 才是有效基线。直接取两轮中位数会把加速比虚增到 5.58×。
+- `PARALLEL=OFF` is strictly equivalent to upstream (0.530 vs 0.530, 4.110 vs 4.070, 16.325 vs 16.180),
+  the rename and code cleanup introduced no serial regression; differences are within ±1.5%.
+- At the time, `w≤2` gave negative returns (0.36~0.74×), with the break-even point near `w=4`; `w=8→15` tends to saturate —
+  ④ the serial `WriterInsert` becomes the bottleneck, and 16 cores will not deliver 16×.
+- On the first round of 32M rows, upstream showed a 46.57 s cold-start anomaly; the steady-state 16.13~16.25 s across the 4 rounds isolated with `CHECKPOINT` is the valid baseline. Taking the median of two rounds directly would inflate the speedup to a false 5.58×.
 
-### 6.2 32M 行扩展性（首版，稳态）
+### 6.2 32M-Row Scalability (First Version, Steady State)
 
-32M 行 / 2.5 GiB 接近内存上限（7.3 GiB），故按 2 轮 + `CHECKPOINT` 隔离取稳态：
+32M rows / 2.5 GiB is close to the memory ceiling (7.3 GiB), so the steady state is taken over 2 rounds + `CHECKPOINT` isolation:
 
-| 配置 | 稳态中位 elapsed | min ~ max | 轮次 | 相对上游 |
+| Config | Steady Median elapsed | min ~ max | Rounds | vs Upstream |
 |---|---|---|---|---|
-| 上游 pg_bulkload 3.1.23 | 16.180 s | 16.130 ~ 16.250 | 4 | 1.00× |
+| Upstream pg_bulkload 3.1.23 | 16.180 s | 16.130 ~ 16.250 | 4 | 1.00× |
 | `PARALLEL=OFF` | 16.325 s | 16.270 ~ 16.380 | 2 | 0.99× |
-| `auto`（=15） | 5.740 s | 5.620 ~ 5.860 | 2 | **2.82×** |
+| `auto` (=15) | 5.740 s | 5.620 ~ 5.860 | 2 | **2.82×** |
 
-同一阶段未加 `CHECKPOINT` 隔离时测得的分档数字为 w1 47.42 / w2 22.17 / w4 10.62 /
-w8 5.80 / w15 5.66 s，其中首轮含上游 46.57 s 的冷启动异常，整体被抬高，**不作为结论**——
-这也是本报告坚持「`CHECKPOINT` 在计时之外执行」的原因。
+The tiered numbers measured in the same stage without `CHECKPOINT` isolation were w1 47.42 / w2 22.17 / w4 10.62 /
+w8 5.80 / w15 5.66 s, where the first round includes upstream's 46.57 s cold-start anomaly, inflating the whole thing, and is **not used as a conclusion** —
+which is also why this report insists on "`CHECKPOINT` run out-of-timing".
 
-大规模下并行收益比 1 GiB 更明显（首版 1 GiB 只有 1.33×，8M 行 2.83×、32M 行 2.82×），
-因为固定开销（DSM 创建、bgworker 启动，数十毫秒量级）被摊薄，而可并行的解析 CPU 总量随
-行数线性增长。
+At large scale the parallel benefit is more pronounced than at 1 GiB (first version's 1 GiB was only 1.33×, 8M rows 2.83×, 32M rows 2.82×),
+because the fixed overhead (DSM creation, bgworker startup, on the order of tens of milliseconds) is amortized, while the total parallelizable parsing CPU grows linearly with row count.
 
 ---
 
-## 7. 结论与调参建议
+## 7. Conclusions and Tuning Recommendations
 
-1. **串行路径零回归**：`PARALLEL=OFF` 与上游一致（±1.5%），可放心把 `PARALLEL` 作为纯增益开关。
-2. **并行收益取决于「解析占比」**：CSV（逐字节状态机）4.5×；定长（C-cast）1.8×——
-   格式越"便宜"，越早饱和于 leader 串行写入。`TYPE=BINARY` 与 `TYPE=FIXED` 走同一解析器，
-   实测差异 ≤1.1%（§4），选哪个都不影响性能，按语义选即可。
-3. **worker 数**：8~15 已接近饱和（1 GiB CSV：w8 4.54×、w15 4.59×）；更多 worker 只增加
-   内存占用（8 MiB 输入队列/worker）。建议从默认值（CPU−1）起步。
-4. **规模越大越值得并行**：首版 32M 行 2.82× vs 1 GiB 1.33×，说明固定开销（DSM、bgworker
-   启动，数十毫秒量级）对小文件不可忽略。
-5. **冷缓存不要恐慌性降 worker**：1× 读设计使并行在冷缓存下仍能反超串行（好窗口 4.6×）；
-   真正的分钟级卡顿是宿主层问题，非配置问题。
-6. **带索引装载**：索引成本约占带索引装载总时间的一半（1 GiB 实测 ≈1.9 s），且该阶段在
-   leader 串行执行；批量导入建议先去掉非必需索引（spool 批构建已比「装载后 `CREATE INDEX`」
-   快 8.3×，见 [OPTIMIZATION.md](OPTIMIZATION.md#84-w-3并行-b-树构建)）。
+1. **Zero serial-path regression**: `PARALLEL=OFF` matches upstream (±1.5%), so `PARALLEL` can safely be used as a pure-gain switch.
+2. **Parallel benefit depends on "parse share"**: CSV (byte-by-byte state machine) 4.5×; fixed-length (C-cast) 1.8× —
+   the "cheaper" the format, the sooner it saturates at the leader's serial writes. `TYPE=BINARY` and `TYPE=FIXED` use the same parser,
+   with a measured difference ≤1.1% (§4); either choice has no performance impact, so pick by semantics.
+3. **Worker count**: 8~15 is already near saturation (1 GiB CSV: w8 4.54×, w15 4.59×); more workers only increase
+   memory usage (8 MiB input queue per worker). It is recommended to start from the default value (CPU−1).
+4. **The larger the scale, the more parallelism pays off**: first version 32M rows 2.82× vs 1 GiB 1.33×, showing that the fixed overhead (DSM, bgworker
+   startup, tens of milliseconds) is non-negligible for small files.
+5. **Don't panic-downgrade workers on cold cache**: the 1× read design lets parallel still overtake serial under cold cache (clean run window 4.6×);
+   true minute-level jitter is a host-layer problem, not a configuration problem.
+6. **Indexed loads**: index cost is about half of the total indexed-load time (1 GiB measured ≈1.9 s), and that phase runs serially in
+   the leader; for bulk imports it is recommended to first drop non-essential indexes (spool batch build is already 8.3× faster than "post-load `CREATE INDEX`",
+   see [OPTIMIZATION.md](OPTIMIZATION.md#84-w-3-parallel-b-tree-index-build)).
