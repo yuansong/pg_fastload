@@ -486,7 +486,9 @@ built from that export — 15.19 / 16.15 / 17.11 / 18.6 / 19rc1 all `INSTALL_OK`
 succeeds, a serial and a `PARALLEL=ON` load of the same file produce the same content digest, and the
 progress view exists. Evidence: `compat_master_pg1x.out`.
 
-The per-major branches were deleted locally and on the remote; the GitHub default branch is `master`.
+The per-major branches were deleted from the local repository and from the remote. `master` is the
+branch to use; the remote's former default `REL_18_STABLE` is a stale pointer that disappears with the
+one-time switch of the default branch to `master` under Settings → Branches.
 
 ---
 
