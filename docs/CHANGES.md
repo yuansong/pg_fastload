@@ -458,6 +458,36 @@ monotonic and stay inside `0..100`. Cross-session polling of a 1 GiB load (`_t_v
 row counter climbing from 1.1 M to 6.5 M in a session that is not the loader's. The CSV 90/90 and
 fixed-length 44/44 suites and the multi-version acceptance are unaffected.
 
+## 19. One Branch: `master` (2026-11-10)
+
+Earlier releases published five per-major branches — `REL_15_STABLE` … `REL_19_STABLE`. They were
+snapshots of the *same* commit: `git diff REL_15_STABLE REL_18_STABLE` is empty, and so is every
+other pair. Keeping them suggested five lines of development where there was one, and forced a fix
+to be pushed five times to stay consistent.
+
+The repository now has a single branch, `master`. The supported range lives in the source instead of
+in the branch namespace:
+
+| File | Change |
+|---|---|
+| `include/pg_fastload.h` | the old `PG_VERSION_NUM < 80300` guard becomes `< 150000`: majors below 15 fail with `#error pg_fastload requires PostgreSQL 15 or later`, so an untested combination cannot silently produce a binary |
+| `docs/PORTING.md`, `PORTING.zh-CN.md` | support matrix loses the "Branch" column; branch policy rewritten as "one branch, `master`" |
+| `README.md`, `README.zh-CN.md` | "each major has a matching `REL_1x_STABLE` branch" becomes one branch, differences resolved by `PG_VERSION_NUM` |
+| delivery notes (both languages) | the same statement in the build section |
+| `make_fastload_deliverables.py` | the portability check asserts the single-branch policy instead of the five branch names |
+
+Why one tree is enough: every difference actually met between 15 and 19 is already a
+`#if PG_VERSION_NUM` branch (the ~30 sites listed in [PORTING.md](PORTING.md) §3) plus the
+version-pinned nbtree builder chosen by the same macro. Nothing is selected at run time, and no build
+flag beyond `PG_CONFIG` has to be remembered.
+
+Verification: `master` was exported with `git archive` (no working-tree help), then each major was
+built from that export — 15.19 / 16.15 / 17.11 / 18.6 / 19rc1 all `INSTALL_OK`, `CREATE EXTENSION`
+succeeds, a serial and a `PARALLEL=ON` load of the same file produce the same content digest, and the
+progress view exists. Evidence: `compat_master_pg1x.out`.
+
+The per-major branches were deleted locally and on the remote; the GitHub default branch is `master`.
+
 ---
 
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

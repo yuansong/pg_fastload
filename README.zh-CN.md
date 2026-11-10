@@ -357,7 +357,8 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 - **验证环境**：PostgreSQL 15.19 / 16.15 / 17.11 / 18.6 / 19rc1，x86_64 Linux，16 vCPU。
   五个主版本都用 `util/fl_ver_test.sh` 跑过同一套功能验收（CSV 串行/并行、定长串行/并行、
   `FILTER` 降级、解析错误处理、命令行客户端），全部通过；版本差异与逐条适配说明见
-  [docs/PORTING.md](docs/PORTING.md)。每一代主版本有对应的 `REL_1x_STABLE` 分支。
+  [docs/PORTING.md](docs/PORTING.md)。**五个主版本共用 `master` 一个分支**：版本差异由
+  `PG_VERSION_NUM` 在编译期解决，`include/pg_fastload.h` 对 15 以下主版本直接 `#error`。
 - **上游署名**：`COPYRIGHT` 原文逐字节保留，每个继承源文件头部保留 `Copyright (c) ... NTT, Inc.`；
   并行子系统的版权归 yuanyuansong (2026)，以相同 BSD 3-Clause 条款发布。
 - **非背书**：本项目未获 NTT, Inc. 或 pg_bulkload 贡献者背书或赞助；不使用其商标做推广。

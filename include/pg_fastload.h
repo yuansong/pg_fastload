@@ -11,8 +11,19 @@
 #undef ENABLE_GSS
 #undef USE_SSL
 
-#if PG_VERSION_NUM < 80300
-#error pg_fastload does not support PostgreSQL 8.2 or earlier versions.
+/*
+ * One tree serves every supported major: PostgreSQL 15 through 19.
+ *
+ * Differences between those majors are resolved here and in the other
+ * PG_VERSION_NUM branches at compile time (plus the version-pinned nbtree
+ * builder, see docs/PORTING.md).  There is no per-major branch to keep in
+ * sync, and therefore no second place for a fix to go missing.
+ *
+ * Refusing anything older is deliberate: an untested combination fails at
+ * compile time instead of producing a binary that misbehaves at run time.
+ */
+#if PG_VERSION_NUM < 150000
+#error pg_fastload requires PostgreSQL 15 or later (see docs/PORTING.md).
 #endif
 
 #include "access/tupdesc.h"
