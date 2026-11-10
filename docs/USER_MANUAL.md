@@ -299,8 +299,6 @@ Every keyword can also be supplied on the command line with `-o KEY=VALUE`
 | `SKIP_INDEX` | `YES` / `NO` | `NO` | drop the target's secondary indexes for the load; rebuild them yourself afterwards (see below) |
 | `VERBOSE` | `YES` / `NO` | `NO` | more detailed progress logging |
 
-| `VERBOSE` | `YES` / `NO` | `NO` | more detailed progress logging |
-
 **`SKIP_INDEX=ON`.** Maintaining indexes during a load costs about as much as
 the load itself (measured ≈1.9 s/GiB for one btree, roughly half of an indexed
 load). `SKIP_INDEX=ON` trades that away for speed with an explicit contract:
@@ -694,8 +692,8 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 | `elapsed_seconds` | since `started` |
 | `rows` | rows the leader has inserted — the number the statement will report |
 | `bytes_read`, `total_bytes` | bytes consumed by the reader / size of the input file (`0` when unknown: STDIN, pipe). For an export `bytes_read` counts bytes **written** and `total_bytes` is always `0` |
-| `total_rows` | `LIMIT`, `0` when unlimited |
-| `percent` | `rows ÷ total_rows` when `LIMIT` is finite, else `bytes_read ÷ total_bytes`, else `NULL` |
+| `total_rows` | `LIMIT` when finite; otherwise, for a `TABLE=` export, the `pg_class.reltuples` estimate of the source table; `0` when unknown |
+| `percent` | `rows ÷ total_rows` when a row total exists (finite `LIMIT`, or a `TABLE=` export), else `bytes_read ÷ total_bytes`, else `NULL` |
 | `bytes_per_second`, `rows_per_second` | averages since the load started |
 | `eta_seconds` | remaining work ÷ rate, `NULL` when the percentage is unknown |
 | `interval_ms` | publishing cadence |
@@ -1076,14 +1074,26 @@ Throughput and the measured scaling curve are in
 ### 18.7 Progress
 
 An export publishes into the same view ([§12.4](#124-load-progress)) with `direction = export`,
-`infile` set to the output file and `bytes_read` counting written bytes. The total is unknown, so
-`percent` and `eta_seconds` are `NULL` while `rows_per_second` and `bytes_per_second` work:
+`infile` set to the output file and `bytes_read` counting written bytes:
 
 ```
- pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | bytes_read
-------+---------+----------------+-----------+------------+--------+---------+---------+------------
- 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
+ pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | percent | eta_seconds | bytes_read
+------+---------+----------------+-----------+------------+--------+---------+---------+---------+-------------+------------
+ 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |    50.0 |       3.42  |  536870912
 ```
+
+* **A `TABLE=` export shows `percent` and `eta_seconds`**: the total row count
+  is estimated from `pg_class.reltuples` (kept fresh by `ANALYZE`/autovacuum),
+  so the view behaves like a load's: percent climbs to 99.9%, ETA counts down,
+  and the closing `NOTICE` line says `100.0% | done` regardless of how the
+  estimate compares with the actual row count. The estimate is only as good as
+  the last `ANALYZE` — after a big bulk load with no analyze yet, `reltuples`
+  may be far off, and the percentage with it.
+* A `QUERY=` export has no row estimate; it reports `rows`, the two rates and
+  `elapsed_seconds`, with `percent`/`eta_seconds` = `NULL`.
+* Refresh cadence is `PROGRESS_INTERVAL` (default 1000 ms, minimum 100 ms);
+  a parallel export's leader republishes on the same cadence from the writer's
+  counters.
 
 ### 18.8 Limitations
 

@@ -304,8 +304,6 @@ KEY = 'VALUE WITH SPACES'
 | `SKIP_INDEX` | `YES` / `NO` | `NO` | 装载期间丢弃目标表的二级索引，装载完成后由用户自行重建（见下） |
 | `VERBOSE` | `YES` / `NO` | `NO` | 输出更详细的进度日志 |
 
-| `VERBOSE` | `YES` / `NO` | `NO` | 输出更详细的进度日志 |
-
 **`SKIP_INDEX=ON`。** 装载期间维护索引的代价与装载本身相当（实测单个 btree 约 1.9 s/GiB，
 约占带索引装载时间的一半）。`SKIP_INDEX=ON` 用一个明确的契约把这代价换掉：
 
@@ -675,8 +673,8 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 | `elapsed_seconds` | 自 `started` 起经过的秒数 |
 | `rows` | leader 已插入的行数，即语句最终会报告的数字 |
 | `bytes_read`、`total_bytes` | reader 已消费字节数 / 输入文件大小（未知时为 `0`：STDIN、管道）。导出时 `bytes_read` 计**已写出**字节，`total_bytes` 恒为 `0` |
-| `total_rows` | `LIMIT`，未限行时为 `0` |
-| `percent` | 有 `LIMIT` 时 `rows ÷ total_rows`，否则 `bytes_read ÷ total_bytes`，都无则 `NULL` |
+| `total_rows` | 有 `LIMIT` 时为 `LIMIT`；否则对 `TABLE=` 导出取源表 `pg_class.reltuples` 估算；未知为 `0` |
+| `percent` | 存在行总量时（`LIMIT` 有限或 `TABLE=` 导出）为 `rows ÷ total_rows`，否则 `bytes_read ÷ total_bytes`，都无则 `NULL` |
 | `bytes_per_second`、`rows_per_second` | 自装载开始至今的平均速率 |
 | `eta_seconds` | 剩余量 ÷ 速率，百分比未知时为 `NULL` |
 | `interval_ms` | 发布间隔 |
@@ -1025,14 +1023,23 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 ### 18.7 进度
 
 导出与装载用同一张视图（[§12.4](#124-加载进度)），记录里 `direction = export`、
-`infile` 是输出文件、`bytes_read` 是已写出的字节数。因为不知道总量，`percent` 与 `eta_seconds`
-为 `NULL`，`rows_per_second`、`bytes_per_second` 照常有：
+`infile` 是输出文件、`bytes_read` 是已写出的字节数：
 
 ```
- pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | bytes_read
-------+---------+----------------+-----------+------------+--------+---------+---------+------------
- 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
+ pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | percent | eta_seconds | bytes_read
+------+---------+----------------+-----------+------------+--------+---------+---------+---------+-------------+------------
+ 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |    50.0 |        3.42 |  536870912
 ```
+
+* **`TABLE=` 导出有 `percent` 与 `eta_seconds`**：总行数取 `pg_class.reltuples`
+  估算（由 `ANALYZE`／autovacuum 保持新鲜），视图行为与装载一致——百分比爬升到
+  99.9% 封顶、ETA 倒计时，收尾 `NOTICE` 一律 `100.0% | done`（无论估算与实际行数
+  差多少）。估算只与最近一次 `ANALYZE` 一样准——大批装载后未 analyze 时 `reltuples`
+  可能偏差很大，百分比随之偏差。
+* `QUERY=` 导出没有行数估算：显示 `rows`、两个速率与 `elapsed_seconds`，
+  `percent`／`eta_seconds` 为 `NULL`。
+* 刷新节奏由 `PROGRESS_INTERVAL` 控制（默认 1000 ms，最小 100 ms）；并行导出由
+  leader 按同一节奏从 writer 计数器重发布。
 
 ### 18.8 限制
 

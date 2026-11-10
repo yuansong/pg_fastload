@@ -57,6 +57,8 @@ typedef struct ProgressInfo
 	bool		notice;			/* PROGRESS_NOTICE = ON */
 	int			interval_ms;	/* publish cadence, 0 => default */
 	int64		limit_rows;		/* LIMIT, INT64_MAX when unlimited */
+	int64		total_rows_hint;	/* estimated total rows (pg_class.reltuples
+								 * for TABLE= exports), 0 when unknown */
 } ProgressInfo;
 
 extern void ProgressInit(const ProgressInfo *info);

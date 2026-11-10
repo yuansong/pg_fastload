@@ -124,6 +124,7 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 	double			duration;
 	bool			binary;
 	int				fieldno = -1;
+	int64			rows_hint = 0;	/* pg_class.reltuples for TABLE= exports */
 
 	/* Same rule as pg_fastload(): the output file is written as the server. */
 	if (!superuser())
@@ -151,6 +152,26 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 
 	DumpExportParams(&eo, wt, query);
 
+	/*
+	 * A TABLE= export can estimate its total row count from pg_class.reltuples
+	 * (populated by ANALYZE / autovacuum).  The estimate feeds the progress
+	 * view's percent and ETA columns; a QUERY= export has no such estimate and
+	 * keeps reporting rows and a rate only.
+	 */
+	if (eo.table != NULL)
+	{
+		Oid			hrelid = ResolveExportRelid(eo.table);
+
+		if (OidIsValid(hrelid))
+		{
+			Relation	hrel = table_open(hrelid, AccessShareLock);
+
+			if (hrel->rd_rel->reltuples > 0)
+				rows_hint = (int64) hrel->rd_rel->reltuples;
+			table_close(hrel, AccessShareLock);
+		}
+	}
+
 	PG_TRY();
 	{
 		int			ret;
@@ -170,7 +191,7 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 		pinfo.notice = eo.progress_notice;
 		pinfo.interval_ms = eo.progress_interval;
 		pinfo.limit_rows = eo.limit;
-
+		pinfo.total_rows_hint = rows_hint;
 
 		/*
 		 * Parallel attempt first: N query workers scan disjoint block ranges
@@ -768,6 +789,9 @@ ExportParallelAttempt(ExportOptions *eo, Writer *wt, TupleDesc *desc,
 	pinfo.notice = eo->progress_notice;
 	pinfo.interval_ms = eo->progress_interval;
 	pinfo.limit_rows = eo->limit;
+	/* The relation is already open here; reltuples is one syscache-free read. */
+	if (rel->rd_rel->reltuples > 0)
+		pinfo.total_rows_hint = (int64) rel->rd_rel->reltuples;
 
 	PG_TRY();
 	{
