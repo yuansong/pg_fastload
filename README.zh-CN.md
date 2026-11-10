@@ -293,8 +293,10 @@ SELECT count, duration FROM pgfastload.pg_fastload(ARRAY[...]);
 
 ## 6. 关键使用约束
 
-1. **并行路径无逐行容错**：坏行（字段数不符、输入函数报错、未闭合引号）会使该 worker 退出、
-   本次加载整体失败，**不写** `PARSE_BADFILE`。需要容错请用 `PARALLEL=OFF`。
+1. **并行路径无逐行容错**：坏行（字段数不符、输入函数报错、未闭合引号）会让整条流水线停下：
+   先输出与串行相同的 `Parse error Record N ...` WARNING，把该记录追加到 `PARSE_BADFILE`，
+   然后语句失败、整次装载回滚（全有或全无 —— 并行装载绝不会保留一个依赖时序的部分集合）。
+   需要 pg_bulkload 那种「保留错误前已读行」的语义请用 `PARALLEL=OFF`。
 2. **不保证物理行序**：分块轮转路由 + 多进程插入，正确性以内容集合为准
    （验证用 `count(*) || sum(hash_record_extended(t,0))`）。
 3. **编码假设**：并行路径假设输入编码 = 数据库编码；非 ASCII 且编码不同时请显式 `ENCODING`

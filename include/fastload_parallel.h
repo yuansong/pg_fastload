@@ -98,6 +98,8 @@ typedef struct FastloadParams
 	int			encoding;
 	Oid			collation;
 	char		infile[MAXPGPATH];
+	char		parse_badfile[MAXPGPATH];	/**< PARSE_BADFILE, written by the
+											 * first worker to reject a record */
 	char		dbname[NAMEDATALEN];
 	char		username[NAMEDATALEN];
 	FastloadColumn cols[FLEXIBLE_ARRAY_MEMBER];
@@ -129,6 +131,23 @@ typedef struct FastloadShared
 	int			worker_state[FASTLOAD_MAX_WORKERS];
 	int64		worker_rows[FASTLOAD_MAX_WORKERS];
 	char		worker_error[FASTLOAD_MAX_WORKERS][256];
+
+	/*
+	 * Parse-error accounting, mirroring ReaderNext() in lib/reader.c.
+	 *
+	 * PARALLEL mode is only entered with PARSE_ERRORS=0, so the upstream
+	 * contract is: the FIRST rejected record stops the load, the record is
+	 * appended to PARSE_BADFILE, a WARNING is logged, and the statement
+	 * returns normally with the rows accepted so far.  A worker that
+	 * catches such an error publishes it here (first writer wins, guarded
+	 * by mutex), sets abort_requested and exits; the reader stops routing
+	 * and the leader reports the outcome instead of failing the statement.
+	 */
+	int			parse_errors;		/* number of rejected records (0 or 1) */
+	bool		abort_requested;	/* stop the reader / other consumers */
+	int64		error_recno;		/* global record number (after SKIP) */
+	int			error_field;		/* column being parsed, 0 if unknown */
+	char		error_message[512];	/* message of the first error */
 
 	/*
 	 * USE_PROFILE=1 only: each worker publishes its own stage times in

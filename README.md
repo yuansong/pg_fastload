@@ -311,8 +311,11 @@ Downgrading is a **safety net, not an error**: `PARALLEL=ON` is always safe to e
 ## 6. Constraints you should know
 
 1. **No per-row tolerance on the parallel path.** A bad row (wrong field count, input-function
-   error, unterminated quote) aborts the worker and the whole load; it is **not** written to
-   `PARSE_BADFILE`. Use `PARALLEL=OFF` when you need tolerance.
+   error, unterminated quote) stops the pipeline: the same `Parse error Record N ...` WARNING lines
+   are logged, the record is appended to `PARSE_BADFILE`, and then the statement fails and the whole
+   load is rolled back (all-or-nothing — a parallel load never keeps a partial, timing-dependent
+   subset). Use `PARALLEL=OFF` when you need pg_bulkload's "keep the rows read before the error"
+   behaviour.
 2. **Row order is not guaranteed.** Chunk round-robin routing plus multi-process inserts; the
    correctness contract is the row multiset (`count(*) || sum(hash_record_extended(t,0))`).
 3. **Encoding assumption.** The parallel path assumes input encoding = database encoding. For

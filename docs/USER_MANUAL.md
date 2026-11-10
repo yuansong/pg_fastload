@@ -275,7 +275,7 @@ Every keyword can also be supplied on the command line with `-o KEY=VALUE`
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
 | `INPUT` / `INFILE` | path or `STDIN` | required | input file; `STDIN` uses the client encoding |
-| `SKIP` / `OFFSET` | integer ≥ 0 | `0` | skip the first N records (records, not bytes) |
+| `SKIP` / `OFFSET` | integer ≥ 0 | `0` | skip the first N **input lines** (`\n`, `\r\n` or a lone `\r` ends a line; quote marks are not honoured, so a multi-line quoted record counts as several lines — same rule as pg_bulkload) |
 | `LOAD` / `LIMIT` | integer | unlimited | load at most N records (counted after `SKIP`) |
 | `ENCODING` | encoding name | database encoding | input encoding; requires per-field conversion |
 
@@ -528,14 +528,17 @@ Serial and parallel runs must produce the same digest; the verification suite as
 
 | Case | Serial path (`PARALLEL=OFF`) | Parallel path (`PARALLEL=ON`) |
 |---|---|---|
-| Wrong field count / input-function error / unterminated quote | counted in `parse_errors`, written to `PARSE_BADFILE`, load continues; once `PARSE_ERRORS` is exceeded reading **stops and the call returns normally** (log: `Maximum parse error count exceeded`), rows already loaded are kept | **the worker exits and the whole load fails** |
+| Wrong field count / input-function error / unterminated quote | counted in `parse_errors`, written to `PARSE_BADFILE`, load continues; once `PARSE_ERRORS` is exceeded reading **stops and the call returns normally** (log: `Maximum parse error count exceeded`), rows already loaded are kept | the same `Parse error Record N: Input Record M ...` WARNING lines are emitted, then the statement **fails with `ERROR` and the whole load is rolled back** (no partial rows) |
 | Duplicate key | written to `DUPLICATE_BADFILE` while ≤ `DUPLICATE_ERRORS`; `ON_DUPLICATE_KEEP` decides the survivor | handled serially by the leader, same behaviour as serial |
 | Constraint violation | error, rollback | error, rollback |
 
 Therefore:
 
 - **Use `PARALLEL=OFF` whenever you need tolerant loading**;
-- The parallel path targets clean data where speed matters;
+- The parallel path targets clean data where speed matters. It is deliberately all-or-nothing on a
+  rejected record: rows for a rejected line are already in flight in other workers, so "keep the rows
+  read before the error" would depend on worker timing and could load a nondeterministic superset of
+  what pg_bulkload loads;
 - When omitted, `PARSE_BADFILE` / `DUPLICATE_BADFILE` are derived from the `LOGFILE` basename and
   live in the same directory.
 

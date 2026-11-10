@@ -49,6 +49,7 @@
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/dsm.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
@@ -115,6 +116,7 @@ typedef struct FastloadRouter
 	int				owner_cur;	/* current chunk owner */
 	int64			route_left; /* bytes still routed to owner_cur */
 	bool			peer_gone;	/* a worker detached: stop routing */
+	FastloadShared *hdr;		/* control block: watched for abort_requested */
 } FastloadRouter;
 
 typedef struct FastloadField
@@ -161,6 +163,8 @@ typedef struct FastloadWorkerCtx
 
 	int64				sent;
 	bool				leader_gone;
+	int64				cur_recno;		/* record index carried by the frame */
+	int					parsing_field;	/* 1-based column under conversion */
 
 #ifdef ENABLE_FASTLOAD_PROFILE
 	instr_time			prof_scan;	/* ring wait time (input acquisition) */
@@ -412,6 +416,103 @@ fl_append_run(char **rec, int *used, int *cap, const char *src, int len)
 }
 
 /* ------------------------------------------------------------------------
+ * Worker: per-record error absorption (PARSE_ERRORS contract)
+ * ------------------------------------------------------------------------ */
+
+/*
+ * Publish a rejected record into the control block and append it to
+ * PARSE_BADFILE.
+ *
+ * PARALLEL mode only runs with PARSE_ERRORS=0, so the upstream rule is "the
+ * first rejected record ends the load".  Only the first worker to hit an error
+ * publishes it (the abort flag is the arbiter), which also guarantees a single
+ * writer on the bad file.
+ */
+static void
+fl_record_parse_error(FastloadWorkerCtx *ctx, ErrorData *edata,
+					  const char *rec, int len)
+{
+	FastloadShared *hdr = ctx->hdr;
+	bool		first = false;
+
+	SpinLockAcquire(&hdr->mutex);
+	if (!hdr->abort_requested)
+	{
+		hdr->abort_requested = true;
+		hdr->parse_errors += 1;
+		hdr->error_recno = ctx->cur_recno;
+		hdr->error_field = ctx->parsing_field;
+		strlcpy(hdr->error_message,
+				edata->message ? edata->message : "<no error message>",
+				sizeof(hdr->error_message));
+		first = true;
+	}
+	SpinLockRelease(&hdr->mutex);
+
+	if (!first)
+		return;
+
+	if (ctx->p->parse_badfile[0] != '\0')
+	{
+		FILE	   *fp = AllocateFile(ctx->p->parse_badfile, "a");
+
+		if (fp != NULL)
+		{
+			fwrite(rec, 1, (size_t) len, fp);
+			fputc('\n', fp);
+			FreeFile(fp);
+		}
+	}
+}
+
+/*
+ * Parse and emit one record, absorbing the per-record error the way
+ * ReaderNext() does on the serial path instead of letting it kill this
+ * background worker process: the error is published to the control block
+ * (which also stops the reader) and the record is appended to
+ * PARSE_BADFILE.  The leader turns the published error into the statement
+ * failure (see fastload_parallel.c).  Returns false when the worker must
+ * stop.
+ */
+static bool
+fl_emit_record_safe(FastloadWorkerCtx *ctx, char *rec, int len)
+{
+	MemoryContext ccxt = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		fl_emit_record(ctx, rec, len);
+	}
+	PG_CATCH();
+	{
+		ErrorData	   *edata;
+		MemoryContext	ecxt;
+		int				sqlstate;
+
+		ecxt = MemoryContextSwitchTo(ccxt);
+		edata = CopyErrorData();
+		sqlstate = edata->sqlerrcode;
+		FlushErrorState();
+
+		/* Query aborts and shutdowns must never be swallowed. */
+		if (sqlstate == ERRCODE_ADMIN_SHUTDOWN ||
+			sqlstate == ERRCODE_QUERY_CANCELED)
+		{
+			MemoryContextSwitchTo(ecxt);
+			PG_RE_THROW();
+		}
+
+		fl_record_parse_error(ctx, edata, rec, len);
+		FreeErrorData(edata);
+		MemoryContextSwitchTo(ecxt);
+		return false;
+	}
+	PG_END_TRY();
+
+	return true;
+}
+
+/* ------------------------------------------------------------------------
  * Worker: drain this worker's input queue
  * ------------------------------------------------------------------------ */
 
@@ -486,11 +587,18 @@ fl_consume_input(FastloadWorkerCtx *ctx)
 				 */
 				if (pend_len == 0 && n >= FL_HDR_LEN)
 				{
+					uint32		recidx;
+
 					memcpy(&len, p, sizeof(uint32));
 					if (FL_HDR_LEN + (Size) len <= n)
 					{
-						fl_emit_record(ctx, (char *) p + FL_HDR_LEN,
-									   (int) len);
+						memcpy(&recidx, p + sizeof(uint32),
+							   sizeof(uint32));
+						ctx->cur_recno = (int64) recidx;
+						if (!fl_emit_record_safe(ctx,
+												 (char *) p + FL_HDR_LEN,
+												 (int) len))
+							goto done;
 						p += FL_HDR_LEN + (Size) len;
 						n -= FL_HDR_LEN + (Size) len;
 						continue;
@@ -514,8 +622,14 @@ fl_consume_input(FastloadWorkerCtx *ctx)
 				}
 				if (pend_len == FL_HDR_LEN + (Size) pend_total)
 				{
+					uint32		recidx;
+
 					/* zero-length record (empty CSV line) */
-					fl_emit_record(ctx, pend + FL_HDR_LEN, (int) pend_total);
+					memcpy(&recidx, pend + sizeof(uint32), sizeof(uint32));
+					ctx->cur_recno = (int64) recidx;
+					if (!fl_emit_record_safe(ctx, pend + FL_HDR_LEN,
+											 (int) pend_total))
+						goto done;
 					pend_len = 0;
 					pend_total = 0;
 				}
@@ -530,13 +644,21 @@ fl_consume_input(FastloadWorkerCtx *ctx)
 				n -= take;
 				if (pend_len == FL_HDR_LEN + (Size) pend_total)
 				{
-					fl_emit_record(ctx, pend + FL_HDR_LEN, (int) pend_total);
+					uint32		recidx;
+
+					memcpy(&recidx, pend + sizeof(uint32), sizeof(uint32));
+					ctx->cur_recno = (int64) recidx;
+					if (!fl_emit_record_safe(ctx, pend + FL_HDR_LEN,
+											 (int) pend_total))
+						goto done;
 					pend_len = 0;
 					pend_total = 0;
 				}
 			}
 		}
 	}
+
+done:
 
 #ifdef ENABLE_FASTLOAD_PROFILE
 	INSTR_TIME_SET_CURRENT(t_end);
@@ -608,8 +730,8 @@ fl_stage_flush(FastloadRouter *router, int owner)
  * was never an output contract -- content completeness is).
  */
 static bool
-fl_route_record(FastloadParams *p, FastloadRouter *router,
-				int64 rec_no, const char *rec, int len)
+fl_route_record(FastloadParams *p, FastloadRouter *router, int64 rec_no,
+				int64 skip, const char *rec, int len)
 {
 	uint32		hdr8[2];
 	int			owner;
@@ -618,9 +740,30 @@ fl_route_record(FastloadParams *p, FastloadRouter *router,
 	if (router->peer_gone)
 		return true;			/* a worker is gone: stop the scan */
 
-	if (rec_no < p->skip)
+	/*
+	 * A worker that rejected a record (parse error) asks the whole pipeline
+	 * to stop, matching the serial contract "PARSE_ERRORS exceeded -> stop
+	 * reading, keep what was already loaded".  Polling every 256 records
+	 * keeps the spinlock traffic negligible on the hot path.
+	 */
+	if (router->hdr != NULL && (rec_no & 0xFF) == 0)
+	{
+		bool	abort;
+
+		SpinLockAcquire(&router->hdr->mutex);
+		abort = router->hdr->abort_requested;
+		SpinLockRelease(&router->hdr->mutex);
+
+		if (abort)
+		{
+			router->peer_gone = true;
+			return true;
+		}
+	}
+
+	if (skip > 0 && rec_no < skip)
 		return false;
-	if (p->limit != INT64_MAX && (rec_no - p->skip) >= p->limit)
+	if (p->limit != INT64_MAX && (rec_no - skip) >= p->limit)
 		return true;			/* whole window delivered: stop early */
 
 	if (router->route_left <= 0)
@@ -647,7 +790,7 @@ fl_route_record(FastloadParams *p, FastloadRouter *router,
 		int		done = 0;
 
 		hdr8[0] = (uint32) len;
-		hdr8[1] = 0;
+		hdr8[1] = (uint32) (rec_no & 0xFFFFFFFF);
 		if (!fl_router_send(router, owner, hdr8, sizeof(hdr8)))
 			return true;
 		while (done < len)
@@ -662,13 +805,130 @@ fl_route_record(FastloadParams *p, FastloadRouter *router,
 	}
 
 	hdr8[0] = (uint32) len;
-	hdr8[1] = 0;
+	hdr8[1] = (uint32) (rec_no & 0xFFFFFFFF);
 	memcpy(router->stage[owner] + router->stage_len[owner], hdr8,
 		   sizeof(hdr8));
 	router->stage_len[owner] += sizeof(hdr8);
 	memcpy(router->stage[owner] + router->stage_len[owner], rec, len);
 	router->stage_len[owner] += len;
 	return false;
+}
+
+/*
+ * Skip the first `p->skip` PHYSICAL lines of the input.
+ *
+ * The serial CSVParserRead() preamble does exactly this: it walks raw bytes,
+ * ending a line at LF, CRLF or a lone CR, and it does NOT honour quote marks.
+ * SKIP is therefore a line count, not a record count -- a quoted field that
+ * spans several physical lines is NOT one "line" for SKIP purposes.  Keeping
+ * the same rule here is what makes SKIP=1 behave identically on both paths.
+ *
+ * Everything after the last skipped terminator is left in `pend` so the record
+ * scan can start from it without re-reading the file.
+ *
+ * `pend` is a caller-owned buffer of `*cap_io` bytes.  Unlike the record scan,
+ * which drains its carry buffer into `rec` on every round, a skipped line can
+ * be arbitrarily long, so the carry keeps growing until a terminator shows up.
+ * The buffer is therefore grown on demand here.
+ */
+static void
+fl_skip_lines(FastloadParams *p, int fd, char *chunk, char **pend_io,
+			  int *cap_io, int *pend_len_io, bool *eof_io)
+{
+	int64		skipped = 0;
+	char	   *pend = *pend_io;
+	int			cap = *cap_io;
+	int			pend_len = *pend_len_io;
+	bool		eof = *eof_io;
+
+	for (;;)
+	{
+		int		total = pend_len;
+		int		i = 0;
+		bool	reached = false;
+
+		while (i < total)
+		{
+			char	c = pend[i];
+
+			if (c == '\r')
+			{
+				if (i + 1 >= total)
+					break;			/* the lookahead byte is in the next read */
+				i += (pend[i + 1] == '\n') ? 2 : 1;
+				if (++skipped >= p->skip)
+				{
+					reached = true;
+					break;
+				}
+				continue;
+			}
+
+			i++;
+			if (c == '\n')
+			{
+				if (++skipped >= p->skip)
+				{
+					reached = true;
+					break;
+				}
+			}
+		}
+
+		/* Drop everything up to the resume point (or keep the pending CR). */
+		if (i > 0)
+		{
+			memmove(pend, pend + i, total - i);
+			pend_len = total - i;
+		}
+
+		if (reached)
+			break;
+
+		if (eof)
+		{
+			if (pend_len > 0)	/* a lone CR at EOF terminates a line */
+			{
+				pend_len = 0;
+				if (++skipped >= p->skip)
+					break;
+			}
+			break;
+		}
+
+		{
+			int		n = (int) read(fd, chunk, FL_READ_CHUNK);
+
+			if (n < 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("pg_fastload reader: could not read input file: %m")));
+			if (n == 0)
+				eof = true;
+			else
+			{
+				if (pend_len + n > cap)
+				{
+					while (pend_len + n > cap)
+						cap *= 2;
+					pend = repalloc(pend, cap);
+				}
+				memcpy(pend + pend_len, chunk, n);
+				pend_len += n;
+			}
+		}
+	}
+
+	if (skipped < p->skip)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not skip " INT64_FORMAT " lines in the input file",
+						p->skip)));
+
+	*pend_io = pend;
+	*cap_io = cap;
+	*pend_len_io = pend_len;
+	*eof_io = eof;
 }
 
 static void
@@ -717,6 +977,13 @@ fl_reader_scan(FastloadParams *p, FastloadRouter *router)
 	pend = palloc(pend_cap);
 	rec = palloc(rec_cap);
 
+	/*
+	 * SKIP counts PHYSICAL lines (see fl_skip_lines()); the record scan below
+	 * therefore starts at record 0 and applies only LIMIT.
+	 */
+	if (p->skip > 0)
+		fl_skip_lines(p, fd, chunk, &pend, &pend_cap, &pend_len, &eof);
+
 	for (;;)
 	{
 		int		n = 0;
@@ -738,6 +1005,17 @@ fl_reader_scan(FastloadParams *p, FastloadRouter *router)
 
 		if (n > 0)
 		{
+			/*
+			 * Normally only one lookahead byte is carried over, but the first
+			 * round after fl_skip_lines() can inherit a much larger tail, so
+			 * grow instead of assuming the carry is tiny.
+			 */
+			if (pend_len + n > pend_cap)
+			{
+				while (pend_len + n > pend_cap)
+					pend_cap *= 2;
+				pend = repalloc(pend, pend_cap);
+			}
 			memcpy(pend + pend_len, chunk, n);
 			pend_len += n;
 		}
@@ -788,8 +1066,8 @@ fl_reader_scan(FastloadParams *p, FastloadRouter *router)
 				fl_append_run(&rec, &rec_used, &rec_cap,
 							  pend + run, i - run);
 
-				/* SKIP / LIMIT window, then route to the chunk owner */
-				if (fl_route_record(p, router, rec_no, rec, rec_used))
+				/* SKIP is applied above; only LIMIT is left to check */
+				if (fl_route_record(p, router, rec_no, 0, rec, rec_used))
 				{
 					/* whole window delivered: stop the scan early */
 					stopped = true;
@@ -830,15 +1108,18 @@ fl_reader_scan(FastloadParams *p, FastloadRouter *router)
 			CHECK_FOR_INTERRUPTS();
 	}
 
-	if (!stopped && in_quote)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("unterminated CSV quoted field")));
-
+	/*
+	 * An unterminated quoted field at EOF is NOT a reader-level failure:
+	 * the serial CSVParserRead() hands the truncated record to the parser,
+	 * which raises "unterminated CSV quoted field" and lets ReaderNext()
+	 * absorb it as a parse error.  Route the truncated record and let the
+	 * worker's own quote check (fl_parse_fields) report it, so both paths
+	 * reject the same record.
+	 */
 	/* Final record without a trailing newline / CR. */
 	if (!stopped && rec_used > 0)
 	{
-		(void) fl_route_record(p, router, rec_no, rec, rec_used);
+		(void) fl_route_record(p, router, rec_no, 0, rec, rec_used);
 		rec_no++;
 	}
 
@@ -912,7 +1193,7 @@ fl_reader_scan_fixed(FastloadParams *p, FastloadRouter *router)
 
 		while (pend_len - i >= stride)
 		{
-			if (fl_route_record(p, router, rec_no, pend + i, (int) stride))
+			if (fl_route_record(p, router, rec_no, p->skip, pend + i, (int) stride))
 			{
 				stopped = true;
 				break;
@@ -994,6 +1275,7 @@ pg_fastload_reader_main(Datum main_arg)
 	router.owner_cur = -1;		/* first advance lands on owner 0 */
 	router.route_left = 0;		/* forces the advance on the first record */
 	router.peer_gone = false;
+	router.hdr = hdr;			/* also watched for parse-error aborts */
 	for (i = 0; i < p->nworkers; i++)
 	{
 		shm_mq	   *mq;
@@ -1155,6 +1437,17 @@ fl_parse_fields(FastloadWorkerCtx *ctx, char *rec, int len)
 			ctx->field_buf[dst++] = c;
 	}
 
+	/*
+	 * Mirror CSVParserRead(): a record whose quoted field is still open at
+	 * the end of the record is rejected.  The reader only produces such a
+	 * record for a file that ends inside quotes; the error is absorbed as a
+	 * parse error exactly like the serial path does.
+	 */
+	if (in_quote)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("unterminated CSV quoted field")));
+
 	/* closing field */
 	{
 		int		rawlen = len - raw_start;
@@ -1200,6 +1493,7 @@ fl_emit_record(FastloadWorkerCtx *ctx, char *rec, int len)
 	 * ownership before routing this record into our input queue, so
 	 * everything that reaches fl_emit_record() must be parsed and emitted.
 	 */
+	ctx->parsing_field = 0;
 	if (ctx->leader_gone)
 		return;
 
@@ -1231,6 +1525,7 @@ fl_emit_record(FastloadWorkerCtx *ctx, char *rec, int len)
 	{
 		int		index = ctx->former.attnum[i];
 
+		ctx->parsing_field = i + 1;
 		if (!ctx->fields[i].is_null)
 		{
 			ctx->former.values[index] =

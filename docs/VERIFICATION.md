@@ -160,8 +160,11 @@ The evaluated-but-rejected approaches (using `WRITER=PARALLEL` as the parallelis
    The 208 B definite lost inherent to PG startup and the `Syscall param write(buf)` in `relcache.c` are normal and not extension leaks.
 3. **Full 10.7 GiB performance comparison not completed**: a 130M-row single transaction needs ~13 GiB table + 10 GiB WAL, exceeding the VM's 51 GiB root partition (`No space left on device`). Therefore no full-scale speedup is given, and benefits are not extrapolated.
 4. **Cold cache still has random stalling rounds**: `vmstat` shows 0 steal / 0 iowait / 100% idle in the stall window, with normal total read volume and bandwidth — it is a latency amplification of blocking calls at the host/hypervisor layer; the serial path is largely immune because the stdio large-block `fread` makes ~500× fewer syscalls. The systematic component on the code side has been eliminated (see §7 Round 4).
-5. **Parallel path has no per-row fault tolerance**: a bad record causes that worker to exit and the entire load to fail, without writing `PARSE_BADFILE`;
-   the single-process path behavior is unchanged.
+5. **Parallel path has no per-row fault tolerance**: a rejected record stops the pipeline; the leader logs
+   the same `Parse error Record N ...` WARNING lines as the serial path (the record is also appended to
+   `PARSE_BADFILE`) and then fails the statement, rolling the whole load back. This is a deliberate
+   all-or-nothing contract — see §10 and USER_MANUAL §11; the single-process path keeps
+   `PARSE_ERRORS` semantics unchanged.
 6. **No ordering guarantee**: chunked round-robin routing does not guarantee physical insertion order (the heap table itself does not either).
 7. **Encoding assumption**: the parallel path assumes the input encoding = database encoding and does not call `CheckerConversion()`.
 
@@ -203,8 +206,49 @@ Per-kernel differences and handling: see [PORTING.md](PORTING.md).
 
 ---
 
-## 10. Conclusion
+## 10. Differential Verification against pg_bulkload (2026-11-10)
 
-The current version meets the delivery criteria across six dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
+Goal: prove that `pg_fastload` is behaviourally identical to the upstream it was forked from, instead
+of only being self-consistent (serial vs parallel).
+
+| Item | Value |
+|---|---|
+| Oracle | upstream `pg_bulkload` 3.1.23 (HEAD `798e0f2`) built against the **same** server, same cluster, same table |
+| Comparison | SRF result row (`skip`/`count`/`parse_errors`/`duplicate_new`/`duplicate_old`) + content digest `count(*)\|\|coalesce(sum(hash_record_extended(t,0)),0)` + severity of emitted messages |
+| Configurations | `pgbulkload.pg_bulkload`, ours `PARALLEL=OFF`, `PARALLEL=ON PARALLEL_WORKERS=2`, `PARALLEL=ON PARALLEL_WORKERS=4` |
+| Suites | 3 lab suites, 75 cases → 225 configuration comparisons, plus the portable [`util/fl_diff_test.py`](../util/fl_diff_test.py) (44 cases × 4 configurations, 132 comparisons) that reproduces the core of the audit on any host with both extensions installed |
+
+Case coverage: quoting / escaping / custom `DELIMITER`+`QUOTE`+`ESCAPE` / CRLF / lone CR / blank and
+whitespace-only lines / missing and extra fields / unterminated quotes / `NULL` strings /
+`FORCE_NOT_NULL` / `ENCODING` / type-conversion failures (int, numeric, date) / `SKIP`+`LIMIT`
+windows including windows crossing a quoted record / `LIMIT=0` / `SKIP` beyond EOF / duplicates on a
+unique index and on a primary key with `ON_DUPLICATE_KEEP=NEW|OLD` / `WRITER=BUFFERED` /
+`WRITER=PARALLEL` / `MULTI_PROCESS` / `PARSE_ERRORS=0` and `=2` / 30k-200k-row inputs / records larger
+than the 1 MiB read chunk / a closing quote, and a 3-byte UTF-8 character, straddling the chunk
+boundary / fixed-length loads with `SKIP`, `LIMIT`, `SKIP`+`LIMIT` and a trailing partial record.
+
+| Configuration | Result (identical on each of the four majors) |
+|---|---|
+| `PARALLEL=OFF` (75 cases) | **75/75 identical** to the oracle (result row, digest and message severity) |
+| `PARALLEL=ON` w=2 / w=4 (150 cases) | **120/150 identical**, 30 documented atomic aborts (rejected-record cases: same WARNING, empty table instead of the oracle's "rows read before the error") |
+| Total mismatches | **0** (225 comparisons per major, 900 in total) |
+
+Four defects were found and fixed by this audit (parallel error absorption, `SKIP` line-vs-record
+semantics, nondeterministic superset after the first rejected record, reader buffer growth on a long
+skipped line); details in [CHANGES.md](CHANGES.md#17-upstream-parity-audit-and-fixes-2026-11-10).
+
+Runs were repeated on PG **15.19 / 16.15 / 17.11 / 18.6** with identical results (900 comparisons in
+total). PG **19rc1** has no oracle: upstream 3.1.23 does not compile against it
+(`nodes.h: unknown type name 'Datum'` — the relocation our `bin/pgut/pgut-list.h` fix handles), so
+19rc1 is covered by the per-major acceptance script (§9) plus the 90/90 and 44/44 suites.
+
+Regression after the fixes: `fastload_verify.py` **90/90 PASS**, `fastload_verify_fixed.py`
+**44/44 PASS**, `fl_ver_test.sh` PASS on 15.19 / 16.15 / 17.11 / 19rc1.
+
+---
+
+## 11. Conclusion
+
+The current version meets the delivery criteria across seven dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
 
 The residual risks can all be attributed to environmental limitations or explicit design trade-offs, as documented in §8 and [OPTIMIZATION.md](OPTIMIZATION.md), along with corresponding usage recommendations (e.g., worker-count selection for cold-cache scenarios, using `PARALLEL=OFF` when fault tolerance is needed).
