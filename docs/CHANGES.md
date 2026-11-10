@@ -693,4 +693,95 @@ compile fix: `table_beginscan()` grew a `ScanOptions` argument, so the call is n
 
 ---
 
+## 21. Serial CSV Path: Bulk Field Split (Round 8, 2026-11-10)
+
+### 21.1 The question and the measurement that answered it
+
+Two claims had to be settled before touching the code: "`PARALLEL=OFF` should take the same time as
+pg_bulkload, because it *is* pg_bulkload's loop", and "the serial path is slower than `COPY`".
+Neither had ever been measured against those exact references, so the first step was a four-way
+same-condition run (same file, same empty table, `CHECKPOINT` outside the timing, 3 rounds):
+
+| Config | Median | vs upstream |
+|---|---|---|
+| upstream `pg_bulkload 3.1.23` | 7.00 s | 1.00× |
+| `pg_fastload PARALLEL=OFF` | 6.95 s | 1.02× |
+| `COPY ... FROM` (regular table, WAL on) | 8.48 s | 0.83× |
+| `COPY ... FROM` (UNLOGGED, no WAL for data) | 7.67 s | 0.91× |
+
+So the first claim held (2% apart, i.e. the same path), and the second one was simply false:
+the serial loader was already 1.22× faster than `COPY ... FROM`, and still faster than `COPY`
+into an UNLOGGED table. The "COPY is faster" impression comes from `COPY ... TO` — the **export**
+direction (3.96 s for the same table), which does a different job and is covered in §20.
+
+That left the real question: where does the 6.95 s go? The profiler could only say
+`READER 6.69 / WRITER 1.25`, so two counters were added inside `CSVParserRead()` — `<CSV> SPLIT`
+(bytes → field pointers) and `<CSV> VALUE` (field pointers → Datums + `heap_form_tuple`):
+
+| Stage | Time | Share |
+|---|---|---|
+| `<CSV> SPLIT` | 1.92 s | 23% |
+| `<CSV> VALUE` | 4.04 s | 47% |
+| `WRITER` (page fill + block flush) | 1.16 s | 14% |
+
+A quarter of the serial path was a per-character state machine, and that part is removable
+without changing any semantics.
+
+### 21.2 The change
+
+`CSVParserRead()` keeps its reference loop untouched; a record takes a new fast path when, and only
+when, it contains neither a quote mark nor a carriage return:
+
+1. one `memchr('\n')` finds the record end inside the already-buffered window;
+2. one pre-scan of the record rejects quote marks and CRs, so multi-line quoted fields, escaped
+   quotes and lone-CR files still go through the state machine;
+3. the record is copied into the scratch field buffer **once**, and each delimiter byte is then
+   replaced by the NUL that terminates the previous field — 16 `memchr` + 16 stores per line
+   instead of ~150 branchy iterations.
+
+The record buffer is never mutated by the fast path, so error reporting (`ParserDumpRecord`),
+`strlen(self->cur)` and buffer refills keep seeing the original bytes. `field_num`, `parsing_field`,
+`base.count` and `checkFieldIsNull()` reproduce the slow loop's bookkeeping exactly, including the
+"extra columns overwrite the last target column" rule and the "blank line is one NULL field" case.
+
+Two smaller things came out of the same profile:
+
+- `CheckerConversion()` was called once per field even when no `ENCODING` was given; the whole
+  118-million-call loop is now behind `if (checker->check_encoding)`;
+- the same bulk splitter was added to `fl_parse_fields()` in `fastload_worker.c`, so the parallel
+  workers get it too (a worker record never contains a terminator; only the quote check applies).
+
+One regression was found by the suite and fixed before shipping: the first version wrote the
+`\0` over a trailing `\r` **before** deciding whether the record was plain, which corrupted the
+buffer for `quoted`/`cross_chunk` records that then fell back to the slow loop (serial produced
+2 rows instead of 5, parallel 5 instead of 3). The fast path now decides first and only then
+touches bytes; `fastload_verify.py` covers exactly these two cases.
+
+### 21.3 Performance
+
+1 GiB CSV / 7,375,042 rows, warm cache, median of 3:
+
+| Config | Before | After | Change |
+|---|---|---|---|
+| `PARALLEL=OFF` | 7.99 s | **5.81 s** | −27% |
+| `PARALLEL_WORKERS=2` | 3.52 s | **2.76 s** | −22% |
+| `PARALLEL_WORKERS=4` | 1.92 s | **1.58 s** | −18% |
+| `PARALLEL_WORKERS=8` | 1.76 s | **1.40 s** | −20% |
+| `auto` (15) | 1.76 s | **1.37 s** | −22% |
+
+The serial path is now **1.20× upstream** and **1.46× `COPY ... FROM`**; the parallel path is
+4.24× the serial one, with the leader's serial `WriterInsert` (~1.14 s) still the floor.
+`<CSV> SPLIT` went 1.92 → 0.90 s; `<CSV> VALUE` (3.82 s) is now 68% of the serial path and is the
+same per-field work `COPY` does, so no further bulk trick is available there.
+
+### 21.4 Verification
+
+`fastload_verify.py` **90/90** and `fastload_verify_fixed.py` **44/44** on PG 18.6, including the
+quoted/lone-CR/cross-chunk/blank-line/extra-column cases that pin the slow-path fallbacks; the build
+is clean on **15.19 / 16.15 / 17.11 / 18.6 / 19rc1**; the 1 GiB digest is
+`7375042|9258128314029119699254` on both `PARALLEL=OFF` and `auto`.
+
+---
+
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*
+

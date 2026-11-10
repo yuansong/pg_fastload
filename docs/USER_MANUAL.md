@@ -40,8 +40,13 @@
 | ③ Form tuples | input functions → `heap_form_tuple()` | leader backend | N workers |
 | ④ Insert | `WriterInsert()` | leader backend | leader backend (unchanged) |
 
-**Without `PARALLEL`, behaviour is identical to pg_bulkload.** With `PARALLEL=ON`, only ①②③ are
-parallelised; ④ plus all transaction, constraint and error semantics stay where they were.
+**Without `PARALLEL`, behaviour is identical to pg_bulkload** — same record loop, same options, same
+error handling. It is not the same *speed* any more: a quote-free record no longer walks the
+byte-at-a-time state machine (see [ARCHITECTURE §6.1a](ARCHITECTURE.md#61a-field-splitting-two-tiers-for-the-same-semantics)),
+which makes the serial path about **1.2× upstream** and **1.4× `COPY ... FROM`** on a 1 GiB plain CSV
+([BENCHMARK §3.1](BENCHMARK.md#31-the-serial-path-against-upstream-and-against-copy--from)) while the
+output stays bit-identical. With `PARALLEL=ON`, only ①②③ are parallelised; ④ plus all transaction,
+constraint and error semantics stay where they were.
 `PARALLEL=ON` is therefore a switch you can leave on: whenever the parallel path cannot guarantee
 identical semantics, the load silently falls back to the serial path and logs one INFO line.
 
@@ -589,7 +594,7 @@ TYPE = CSV
 ...
 worker #0 produced 492013 rows
 ...
-CPU 1.20s/13.40u sec elapsed 1.76 sec
+CPU 1.07s/11.60u sec elapsed 1.37 sec
 ```
 
 | Look for | Meaning |
@@ -609,6 +614,7 @@ make USE_PGXS=1 USE_PROFILE=1 PG_CONFIG=/path/to/pg_config
 |---|---|---|
 | `GLOBAL` | `INIT` / `READER` / `WRITER` / `FLUSH` / `MERGE` / `INDEX` / `FINISH` / `PARALLEL` | whole run; `PARALLEL` is the parallel subsystem total |
 | `READER` | `SOURCE` / `PARSER` | serial path read/parse |
+| `CSV` | `SPLIT` / `VALUE` | serial CSV only: bytes → field pointers (record scan, quote/CR check, in-place delimiter cuts), then field pointers → `Datum`s + `heap_form_tuple()` |
 | `WRITER` | `TOAST` / `TABLE` / `INDEX` | insert breakdown |
 | `PARALLEL` | `SETUP` / `WAIT` / `COPY` / `WRITE` / `READ` | orchestration, waiting for workers, copying returned tuples, heap write, reader scan |
 | `WORKER` | `SCAN` / `FORM` / `IPC` | worker-side dequeue / tuple forming / messaging (summed across processes) |

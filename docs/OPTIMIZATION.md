@@ -18,8 +18,9 @@ Baseline environment: 1 GiB TPC-H lineitem CSV (7,375,042 rows × 16 columns), V
 | Round 5 | Fixed-length parallelization | 1 item (P-1) | — |
 | Round 6 | Index-less spool early exit | 1 item (W-3a) | 3 items (W-1, W-2, W-3) |
 | Round 7 | Code cleanup | 9 places (no behavioral change) | — |
+| Round 8 | Serial CSV bulk field split | 2 items (F-1 split, F-2 encoding-loop hoist) | — |
 
-Cumulative: **13 adopted optimizations + 1 round of code cleanup; 4 rejected** (see Section 8 for details).
+Cumulative: **15 adopted optimizations + 1 round of code cleanup; 4 rejected** (see Section 8 for details).
 
 ---
 
@@ -39,25 +40,28 @@ Cumulative: **13 adopted optimizations + 1 round of code cleanup; 4 rejected** (
 | 10 | Round 5 | P-1 fixed-length parallelization | BINARY/FIXED plugged into the single-reader, multi-worker pipeline: reader splits by STRIDE, worker rebuilds COL descriptor via DSM blob and mirrors ExtractValuesFromFixed | Fixed-length 1 GiB: serial 1.62 s → w8 **0.89 s (1.82×)** |
 | 11 | Round 6 | W-3a index-less spool early exit | SpoolerInsert() returns early when ri_NumIndices <= 0, eliminating per-tuple ExecStoreHeapTuple + econtext busy-wait (0.28 s/1 GiB) | fl_auto 1.87 → **1.75 s (1.07×)**; w15 1.91→1.73; fl_off 8.24→7.91 |
 | 12 | Round 7 | Code cleanup | Dead fields, duplicated logic (single definition of FastloadDefaultWorkers()), undocumented aliases, shared pointers inside lock critical sections, MULTI_PROCESS combination guards, artifact cleanup | No behavioral change; 90/90 + 44/44 + 8/8 all green |
+| 13 | Round 8 | F-1 bulk CSV field split | Quote-free records no longer walk the byte-by-byte state machine: one `memchr('\n')`, one quote/CR pre-scan, one record copy into the scratch field buffer, then each delimiter is cut in place. Same splitter in the parallel workers (`fl_parse_fields`) | `<CSV> SPLIT` **1.92 → 0.90 s**; fl_off 7.99 → **5.81 s**, auto 1.76 → **1.37 s** |
+| 14 | Round 8 | F-2 encoding-loop hoist | `CheckerConversion()` was invoked once per field even with no `ENCODING` option; the 118 M-call loop now sits behind `if (checker->check_encoding)` | Included in the 3.82 s `VALUE` figure |
 
 ---
 
 ## 3. Performance evolution per configuration (1 GiB warm-cache median, seconds)
 
-| Config | Original baseline (first ver.) | After P0 | After single-reader, multi-worker | After Round 4 | After Round 6 | vs. original | vs. serial |
-|---|---|---|---|---|---|---|---|
-| fl_off (serial control) | 8.19 | 8.12 | 8.13 | 8.24 | **7.91** | 1.04× | 1.00× |
-| fl_w1 | 16.215 | 8.07 | 8.05 | 8.23 | **7.86** | **2.06×** | ≈serial |
-| fl_w2 | 7.76 | 6.82 | 3.46 | 3.32 | **3.28** | **2.37×** | 2.41× |
-| fl_w4 | 3.27 | 2.95 | 1.97 | 1.96 | **1.91** | **1.71×** | 4.14× |
-| fl_w8 | 2.53 | 2.32 | 1.95 | 1.88 | **1.75** | **1.45×** | 4.52× |
-| fl_w15 | 2.30 | 2.32 | 2.01 | 1.91 | **1.73** | **1.33×** | 4.57× |
-| fl_auto (=15) | 2.32 | 2.34 | 1.99 | 1.87 | **1.75** | **1.33×** | 4.52× |
+| Config | Original baseline (first ver.) | After P0 | After single-reader, multi-worker | After Round 4 | After Round 6 | **Current (Round 8)** | vs. original | vs. serial |
+|---|---|---|---|---|---|---|---|---|
+| fl_off (serial control) | 8.19 | 8.12 | 8.13 | 8.24 | 7.91 | **5.81** | 1.41× | 1.00× |
+| fl_w1 | 16.215 | 8.07 | 8.05 | 8.23 | 7.86 | **5.80** | **2.80×** | ≈serial |
+| fl_w2 | 7.76 | 6.82 | 3.46 | 3.32 | 3.28 | **2.76** | **2.81×** | 2.11× |
+| fl_w4 | 3.27 | 2.95 | 1.97 | 1.96 | 1.91 | **1.58** | **2.07×** | 3.68× |
+| fl_w8 | 2.53 | 2.32 | 1.95 | 1.88 | 1.75 | **1.40** | **1.81×** | 4.15× |
+| fl_w15 | 2.30 | 2.32 | 2.01 | 1.91 | 1.73 | **≈1.37** | **1.68×** | 4.24× |
+| fl_auto (=15) | 2.32 | 2.34 | 1.99 | 1.87 | 1.75 | **1.37** | **1.69×** | 4.24× |
 
 > "Original baseline" is the median of the first version (each worker scanning the full file, with per-record modulo routing), hence w=1 as high as 16.2 s.
 >
-> The code-cleanup round (Round 7) has no performance change; a later re-test measured fl_off 7.99 / w1 7.97 / w2 3.52 / w4 1.92 /
-> w8 1.76 / w15 1.74 / auto 1.76 s, differences from the table above are within the ±5% run-to-run variance. This table uses the measurement taken within each respective round.
+> Round 8 removed ~1.0 s of per-byte field splitting from every configuration, which is why the serial column moves too:
+> the serial path is now 1.20× upstream `pg_bulkload` and 1.46× `COPY ... FROM` ([BENCHMARK §3.1](BENCHMARK.md#31-the-serial-path-against-upstream-and-against-copy--from)).
+> `fl_w15` was not re-measured separately; at that width it tracks `auto` within noise (they share the same 15-worker default).
 
 ---
 
@@ -76,15 +80,17 @@ Cumulative: **13 adopted optimizations + 1 round of code cleanup; 4 rejected** (
 
 ## 5. Cumulative gains
 
-1. **w=1**: 16.215 → 7.86 s, **2.06×** (eliminated fixed overhead of the parallel mechanism, back to serial level);
-2. **w=2**: 7.76 → 3.28 s, **2.37×** (2.41× vs. serial);
-3. **w=4**: 3.27 → 1.91 s, **1.71×** (4.14× vs. serial);
-4. **w=8 / w15 / auto**: 2.53 / 2.30 / 2.32 → 1.75 / 1.73 / 1.75 s,
-   **1.45× / 1.33× / 1.33×** (≈4.5× vs. serial, already saturated at the leader-side serial `WriterInsert`
-   structural floor of ~1.3 s/1 GiB);
+1. **w=1**: 16.215 → 5.80 s, **2.80×** (eliminated fixed overhead of the parallel mechanism, back to serial level);
+2. **w=2**: 7.76 → 2.76 s, **2.81×** (2.11× vs. serial);
+3. **w=4**: 3.27 → 1.58 s, **2.07×** (3.68× vs. serial);
+4. **w=8 / w15 / auto**: 2.53 / 2.30 / 2.32 → 1.40 / ≈1.37 / 1.37 s,
+   **1.81× / 1.68× / 1.69×** (≈4.2× vs. serial, already saturated at the leader-side serial `WriterInsert`
+   structural floor of ~1.14 s/1 GiB);
 5. **Fixed-length mode**: 1 GiB serial 1.62 s → fastest parallel 0.89 s (**1.82×**);
 6. **Cold cache**: from 6.49× slower than serial in the first version → under good windows **surpasses serial by up to 4.9×**;
-7. **Serial path (PARALLEL=OFF) unchanged**: 8.19 → 7.91 s (W-3a also benefits the serial SpoolerInsert), no regression.
+7. **Serial path (PARALLEL=OFF)**: 8.19 → **5.81 s (1.41×)**, of which W-3a contributed the spool early exit and
+   Round 8 the bulk field split; it now runs **1.20× upstream pg_bulkload** and **1.46× `COPY ... FROM`**
+   on the same file.
 
 ---
 

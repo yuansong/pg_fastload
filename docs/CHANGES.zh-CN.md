@@ -629,5 +629,85 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 
 ---
 
+## 21. 串行 CSV 路径：批量切分（第八轮，2026-11-10）
+
+### 21.1 先把两个说法变成数字
+
+动代码之前有两个断言需要先证实：「`PARALLEL=OFF` 就是 pg_bulkload 的循环，耗时应与它一致」，以及
+「串行比 `COPY` 慢」。两者此前都没有在完全同条件下量过，所以第一步是四路对照（同一文件、同一空表、
+`CHECKPOINT` 在计时之外、各 3 轮）：
+
+| 配置 | 中位 | 相对上游 |
+|---|---|---|
+| 上游 `pg_bulkload 3.1.23` | 7.00 s | 1.00× |
+| `pg_fastload PARALLEL=OFF` | 6.95 s | 1.02× |
+| `COPY ... FROM`（普通表，走 WAL） | 8.48 s | 0.83× |
+| `COPY ... FROM`（UNLOGGED，数据不写 WAL） | 7.67 s | 0.91× |
+
+结论：第一个说法成立（差 2%，同一条路径）；第二个说法不成立 —— 串行装载本来就比 `COPY ... FROM`
+快 1.22×，甚至比往 UNLOGGED 表 `COPY` 还快。「COPY 更快」的印象来自 `COPY ... TO`，那是**导出**
+方向（同表 3.96 s），做的是另一件事，见 §20。
+
+于是问题变成：这 6.95 s 到底花在哪。原来的 profile 只能给到 `READER 6.69 / WRITER 1.25`，
+所以在 `CSVParserRead()` 内部补了两个计数器 —— `<CSV> SPLIT`（字节 → 字段指针）与
+`<CSV> VALUE`（字段指针 → Datum + `heap_form_tuple`）：
+
+| 分段 | 耗时 | 占比 |
+|---|---|---|
+| `<CSV> SPLIT` | 1.92 s | 23% |
+| `<CSV> VALUE` | 4.04 s | 47% |
+| `WRITER`（填页 + 块落盘） | 1.16 s | 14% |
+
+串行路径有四分之一是逐字符状态机，而这一段可以整块去掉且不改任何语义。
+
+### 21.2 改动
+
+`CSVParserRead()` 的参考实现原样保留；一条记录只有在**既无引号、也无回车**时才走新的快路径：
+
+1. 一次 `memchr('\n')` 在已缓冲窗口内找到记录末尾；
+2. 一次预扫描拒绝引号与 `\r`，因此带引号的多行字段、转义引号、lone-CR 文件仍走状态机；
+3. 记录**整条**复制进字段缓冲一次，随后把每个分隔符字节就地改成上一字段的 NUL 结尾 ——
+   每行 16 次 `memchr` + 16 次写入，取代约 150 次分支判断。
+
+快路径从不改动记录缓冲，因此错误落盘（`ParserDumpRecord`）、`strlen(self->cur)` 与缓冲补数据
+看到的仍是原始字节。`field_num`、`parsing_field`、`base.count` 与 `checkFieldIsNull()` 完全复刻
+慢循环的记账规则，包括「多余列覆盖最后一个目标列」与「空行视为一个 NULL 字段」。
+
+同一份 profile 还顺带暴露两件小事：
+
+- 没给 `ENCODING` 时 `CheckerConversion()` 仍被逐字段调用；现在整段 1.18 亿次调用被
+  `if (checker->check_encoding)` 挡住；
+- 同一个批量切分器也加到了 `fastload_worker.c` 的 `fl_parse_fields()`，并行 worker 一并受益
+  （worker 手里的记录不含行结束符，只需判引号）。
+
+套件当场抓到一个回归并修掉：第一版在**判定是否可走快路径之前**就把行尾 `\r` 写成 `\0`，
+导致随后回退到慢循环时缓冲已被破坏（`quoted`/`cross_chunk` 两个用例：串行只剩 2 行、并行 5 行）。
+现在先判定、成功后才改字节；`fastload_verify.py` 的两个用例正好钉住这条路径。
+
+### 21.3 性能
+
+1 GiB CSV / 7,375,042 行，热缓存，3 轮中位：
+
+| 配置 | 改动前 | 改动后 | 变化 |
+|---|---|---|---|
+| `PARALLEL=OFF` | 7.99 s | **5.81 s** | −27% |
+| `PARALLEL_WORKERS=2` | 3.52 s | **2.76 s** | −22% |
+| `PARALLEL_WORKERS=4` | 1.92 s | **1.58 s** | −18% |
+| `PARALLEL_WORKERS=8` | 1.76 s | **1.40 s** | −20% |
+| `auto`（15） | 1.76 s | **1.37 s** | −22% |
+
+串行路径现在是**上游的 1.20×**、**`COPY ... FROM` 的 1.46×**；并行是串行的 4.24×，
+下限仍是 leader 串行 `WriterInsert`（≈1.14 s）。`<CSV> SPLIT` 1.92 → 0.90 s；`<CSV> VALUE`
+（3.82 s）已占串行路径 68%，它就是 `COPY` 同样要做的逐字段工作，这块没有批量技巧可挖。
+
+### 21.4 验证
+
+PG 18.6 上 `fastload_verify.py` **90/90**、`fastload_verify_fixed.py` **44/44**，其中
+quoted / lone-CR / cross-chunk / 空行 / 多余列这些用例正好钉住慢路径的回退；**15.19 / 16.15 /
+17.11 / 18.6 / 19rc1** 全量编译通过；1 GiB 摘要在 `PARALLEL=OFF` 与 `auto` 上均为
+`7375042|9258128314029119699254`。
+
+---
+
 *未采纳方案汇总见 [OPTIMIZATION.zh-CN.md](OPTIMIZATION.zh-CN.md#八未采纳方案汇总)；性能数据见
 [BENCHMARK.md](BENCHMARK.md)；验证结论见 [VERIFICATION.md](VERIFICATION.md)。*

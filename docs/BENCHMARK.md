@@ -30,7 +30,7 @@
 | Ordering bias | Multiple rounds alternate forward / reverse order, take the **median** |
 | CHECKPOINT interference | `CHECKPOINT` is run **out-of-timing** — otherwise the previous round's dirty-page flush would fall into the next round, which once produced a false speedup of 5.58× |
 | Content correctness | `count(*) \|\| sum(hash_record_extended(t,0))`, independent of physical insertion order |
-| Equivalence anchor | `PARALLEL=OFF` should match upstream timing, used to identify environment jitter |
+| Equivalence anchor | `PARALLEL=OFF` runs the upstream algorithm; it is compared against upstream `pg_bulkload 3.1.23` and against `COPY ... FROM` (§3.1) so that any change of the serial path shows up as a number, not an opinion |
 | Index | Unless otherwise specified, the benchmark table has **no index** (the gain from W-3a comes precisely from this scenario) |
 
 Configuration set: `fl_off` (`PARALLEL=OFF`, serial control), `fl_w1`, `fl_w2`, `fl_w4`, `fl_w8`, `fl_w15`,
@@ -42,32 +42,71 @@ Configuration set: `fl_off` (`PARALLEL=OFF`, serial control), `fl_w1`, `fl_w2`, 
 
 | Config | r1 | r2 | r3 | **Median** | vs Serial | vs First Version |
 |---|---|---|---|---|---|---|
-| `fl_off` | 8.02 | 7.99 | 7.98 | **7.99 s** | 1.00× | 1.03× |
-| `fl_w1` | 8.00 | 7.97 | 7.97 | **7.97 s** | 1.00× | 2.03× |
-| `fl_w2` | 3.52 | 3.68 | 3.31 | **3.52 s** | 2.27× | 2.20× |
-| `fl_w4` | 2.11 | 1.92 | 1.90 | **1.92 s** | 4.16× | 1.70× |
-| `fl_w8` | 1.76 | 1.77 | 1.74 | **1.76 s** | 4.54× | 1.44× |
-| `fl_w15` | 1.74 | 1.74 | 31.83\* | **1.74 s** | 4.59× | 1.32× |
-| `fl_auto` | 1.76 | 19.19\* | 1.71 | **1.76 s** | 4.54× | 1.32× |
+| `fl_off` | 5.86 | 5.81 | 5.79 | **5.81 s** | 1.00× | 1.41× |
+| `fl_w1` | 5.81 | 5.78 | —† | **5.80 s** | 1.00× | 2.80× |
+| `fl_w2` | 33.11\* | 2.76 | 2.74 | **2.76 s** | 2.11× | 2.81× |
+| `fl_w4` | 1.58 | 1.56 | 1.58 | **1.58 s** | 3.68× | 2.07× |
+| `fl_w8` | 1.40 | 31.83\* | 1.39 | **1.40 s** | 4.15× | 1.81× |
+| `fl_auto` | 1.37 | 1.36 | 1.37 | **1.37 s** | 4.24× | 1.69× |
 
 \* Occasional host hypervisor jitter round (see §5 for details), automatically excluded when taking the median.
+† `fl_w1` takes the serial fallback (`PARALLEL disabled`), so it is the same code path as `fl_off`; measured twice only.
 
-**Content verification**: The digests for all 7 configurations are `7375042|9258128314029119699254` (`ALL_MATCH = True`).
+**Content verification**: The digests for `fl_off` and `fl_auto` are `7375042|9258128314029119699254` (`MATCH = True`).
 
-**Segmented profile (`USE_PROFILE=1`)**:
+**Segmented profile (`USE_PROFILE=1`)** — the profile build adds ~1.4 s of `clock_gettime` overhead to the serial path, so use these numbers for shares, not absolutes:
 
 | Config | GLOBAL | PARALLEL{COPY, READ, SETUP, WAIT, WRITE} | WORKER{FORM, IPC, SCAN} |
 |---|---|---|---|
-| `fl_w1` | 7.985 s | all 0 (serial path) | all 0 |
-| `fl_w2` | 3.519 s | COPY 0.178 / READ 3.435 / WAIT 2.169 / WRITE 1.125 | FORM 5.654 / IPC 0.728 / SCAN 0.530 |
-| `fl_w4` | 1.915 s | COPY 0.204 / READ 1.827 / WAIT 0.491 / WRITE 1.176 | FORM 5.796 / IPC 1.206 / SCAN 0.378 |
-| `fl_auto` | 1.761 s | COPY 0.183 / READ 1.554 / WAIT 0.350 / WRITE 1.152 | FORM 6.452 / IPC 17.206 / SCAN 1.358 |
+| `fl_off` | 7.284 s → READER 5.966 / WRITER 1.120 | all 0 (serial path) | all 0 |
+| `fl_w2` | 3.063 s | COPY 0.182 / READ 2.981 / WAIT 1.728 / WRITE 1.103 | FORM 4.957 / IPC 0.730 / SCAN 0.340 |
+| `fl_w4` | 1.841 s | COPY 0.186 / READ 1.761 / WAIT 0.441 / WRITE 1.160 | FORM 5.350 / IPC 1.350 / SCAN 0.404 |
+| `fl_auto` | 1.752 s | COPY 0.182 / READ 1.543 / WAIT 0.351 / WRITE 1.142 | FORM 5.656 / IPC 16.963 / SCAN 2.172 |
+
+The serial path is split further, because its 82% reader share is what this round attacked:
+
+| `fl_off` stage | before | after | what it is |
+|---|---|---|---|
+| `<CSV> SPLIT` | 1.922 s | **0.896 s** | bytes → field pointers: record scan, quote/CR check, field termination |
+| `<CSV> VALUE` | 4.043 s | **3.819 s** | `numeric_in` / `date_in` / `int4in` / `text_in` per field, then `heap_form_tuple()` |
+| `WRITER` | 1.157 s | 1.120 s | page fill (`PageAddItem`), 8 MiB block flush, spool check |
 
 Interpretation:
 
 - `WRITE ≈ 1.15 s` barely changes with the number of workers — this is precisely the floor of the leader's serial `WriterInsert`;
-- The `WORKER` group is the **sum of each worker's time** (accumulated across processes), so `FORM 6.45 s` with 15 workers corresponds to ≈0.43 s per worker and is not on the critical path;
-- `WAIT` decreases as the worker count grows (w2 2.17 s → auto 0.35 s), indicating that at w2 the leader is waiting for data, while at auto the leader is waiting on its own writes.
+- The `WORKER` group is the **sum of each worker's time** (accumulated across processes), so `FORM 5.66 s` with 15 workers corresponds to ≈0.38 s per worker and is not on the critical path;
+- `WAIT` decreases as the worker count grows (w2 1.73 s → auto 0.35 s), indicating that at w2 the leader is waiting for data, while at auto the leader is waiting on its own writes;
+- The serial path is now **68% type conversion** (`VALUE`), i.e. the same work `COPY ... FROM` does per field; there is no bulk trick left there, which is why the remaining gap to the parallel path is a CPU limit and not a latency one.
+
+### 3.1 The Serial Path Against Upstream and Against `COPY ... FROM`
+
+`PARALLEL=OFF` is not a re-implementation: it is the upstream per-record loop. The question "should it not take the same time as
+pg_bulkload" therefore has a measurable answer, and so does "is it slower than COPY":
+
+| Config | r1 | r2 | r3 | **Median** | vs Upstream | CPU (sys+user) |
+|---|---|---|---|---|---|---|
+| upstream `pg_bulkload 3.1.23` | 7.04 | 7.00 | 6.98 | **7.00 s** | 1.00× | 6.77 s |
+| `pg_fastload PARALLEL=OFF` | 5.83 | 5.82 | 5.77 | **5.82 s** | **1.20×** | 5.57 s |
+| `COPY ... FROM` (regular table, WAL on) | 8.48 | 8.37 | 8.48 | **8.48 s** | 0.83× | — |
+| `COPY ... FROM` (UNLOGGED twin, no WAL for data) | 7.71 | 7.67 | 7.67 | **7.67 s** | 0.91× | — |
+
+Same file (`/tmp/tpch/lineitem.csv`), same empty table, `CHECKPOINT` outside the timing, 3 rounds each, `synchronous_commit=on`, `wal_level=replica`.
+
+Reading it:
+
+1. **`PARALLEL=OFF` and upstream are the same algorithm, and they run at the same speed** — before this round the two were
+   6.95 s vs 7.09 s (2% apart). They are no longer equal only because the serial path was optimised *on top of* the upstream
+   loop in Round 8 (bulk field split, §3 profile table): 5.82 s vs 7.00 s = **1.20× faster than upstream**, with the same
+   output (`7375042` rows, identical digest) and the same option semantics.
+2. **`PARALLEL=OFF` is not slower than `COPY ... FROM`; it is 1.46× faster** (5.82 s vs 8.48 s), and still 1.32× faster than
+   `COPY` into an UNLOGGED table, where the data pages generate no WAL at all. Two structural reasons: `WRITER=DIRECT`
+   bypasses both the buffer manager and per-tuple WAL, and `COPY` additionally pays a per-row `MemoryContextReset`,
+   a `NextCopyFrom` round trip and tuple-slot storage that this path does not have.
+3. The comparison that *looks* like "copy is faster" is `COPY ... TO` — the **export** direction (3.96 s for the same table,
+   §8). Load and export are different directions with different amounts of work; they are not comparable.
+4. `synchronous_commit` does not enter the picture: `COPY` into an UNLOGGED table is still the slower one, so the gap is
+   CPU per row, not durability.
+
 
 ---
 
@@ -114,9 +153,9 @@ Driver script: `bench_binary_fixed.py` (3 rounds of `BINARY`, 3 rounds of `FIXED
 `10737418|12495206446709334590242` (`ALL_MATCH = True`).
 `TYPE=FIXED` can be used as an alias for `TYPE=BINARY`, and vice versa.
 
-**Conclusion 2: The parallel speedup narrows according to the "parallelizable CPU share."** Fixed-length serial needs only 1.59 s, while CSV serial needs 7.99 s
-(§3) — fixed-length has no quoting state machine, values are directly C-cast, and splitting is by fixed offset. The fixed overhead of loading 1 GiB (reading the file, writing heap pages, leader serial `WriterInsert`) therefore accounts for a larger share, so the speedup drops from 4.5× for CSV to 1.83×,
-but the **absolute time is still 1/2 of CSV's** (w8: 0.87 s vs 1.76 s).
+**Conclusion 2: The parallel speedup narrows according to the "parallelizable CPU share."** Fixed-length serial needs only 1.59 s, while CSV serial needs 5.81 s
+(§3) — fixed-length has no quoting state machine, values are directly C-cast, and splitting is by fixed offset. The fixed overhead of loading 1 GiB (reading the file, writing heap pages, leader serial `WriterInsert`) therefore accounts for a larger share, so the speedup drops from 4.2× for CSV to 1.83×,
+but the **absolute time is still 1/2 of CSV's** (w8: 0.87 s vs 1.40 s).
 
 **Round noise**: Of the 42 timing units this run, 5 were polluted by 19–31 s host hypervisor jitter (both serial and
 parallel, unrelated to the configuration); all were removed by the median; the rounds judged as polluted retain their raw values in `bench_binary_fixed.json`
@@ -135,6 +174,11 @@ for review.
 
 \* Host-layer jitter round.
 
+> The serial row above was measured **before** the Round 8 split change. The change removes CPU work only (1.0 s of
+> field splitting per GiB), and a cold-cache serial run is dominated by the same CPU plus the file read, so its cold
+> number should drop by roughly the same absolute amount; it was not re-measured because the cold-cache harness spends
+> most of its wall time evicting pages, and the parallel rows are what the eviction experiment is about.
+
 **On residual jitter**: Parallel configurations still randomly show rounds of 11~62 s. The diagnosis (per-second vmstat sampling, `dd` probes,
 multiple cold_diag runs) is — within the jitter window the guest's `steal` is 0, `iowait` is 0, CPU 100% idle,
 total read volume and bandwidth are normal, i.e. the host/hypervisor amplifies the latency of **blocking syscalls** (a single call amplified to ~1.85 ms).
@@ -148,7 +192,7 @@ and within the clean run window parallel **overtakes serial by up to 4.9×**. Th
 
 ## 6. Same-Condition Comparison with Upstream pg_bulkload 3.1.23 (First-Version Measurement, Historical Baseline)
 
-> This data was measured in the v1.0.0 first version (N workers each doing a full scan). It is retained to ① prove that `PARALLEL=OFF` is strictly equivalent to upstream; ② illustrate the historical baseline for parallel scalability.
+> This data was measured in the v1.0.0 first version (N workers each doing a full scan). It is retained to ① illustrate the historical baseline for parallel scalability; ② show the serial path of that version sitting exactly on the upstream line — which is the anchor the Round 8 split later moved by 20% (§3.1 has the current same-condition numbers).
 > The current version's numbers at these sizes should beat the table below (see Section 3 for the same-file 1 GiB comparison).
 
 ### 6.1 Warm Cache
@@ -159,8 +203,9 @@ and within the clean run window parallel **overtakes serial by up to 4.9×**. Th
 | 8M rows / 640 MB | 4.070 s | 4.110 s | 1.440 s | 2.83× |
 | 32M rows / 2.5 GiB (steady state) | 16.180 s | 16.325 s | 5.740 s | 2.82× |
 
-- `PARALLEL=OFF` is strictly equivalent to upstream (0.530 vs 0.530, 4.110 vs 4.070, 16.325 vs 16.180),
-  the rename and code cleanup introduced no serial regression; differences are within ±1.5%.
+- `PARALLEL=OFF` was strictly equivalent to upstream at the time of this measurement (0.530 vs 0.530, 4.110 vs 4.070, 16.325 vs 16.180),
+  so the rename and code cleanup introduced no serial regression; differences are within ±1.5%. Round 8 later optimised the
+  serial loop itself, which is why the current figure is 1.20× upstream instead of 1.00× (§3.1).
 - At the time, `w≤2` gave negative returns (0.36~0.74×), with the break-even point near `w=4`; `w=8→15` tends to saturate —
   ④ the serial `WriterInsert` becomes the bottleneck, and 16 cores will not deliver 16×.
 - On the first round of 32M rows, upstream showed a 46.57 s cold-start anomaly; the steady-state 16.13~16.25 s across the 4 rounds isolated with `CHECKPOINT` is the valid baseline. Taking the median of two rounds directly would inflate the speedup to a false 5.58×.
@@ -190,7 +235,7 @@ because the fixed overhead (DSM creation, bgworker startup, on the order of tens
 2. **Parallel benefit depends on "parse share"**: CSV (byte-by-byte state machine) 4.5×; fixed-length (C-cast) 1.8× —
    the "cheaper" the format, the sooner it saturates at the leader's serial writes. `TYPE=BINARY` and `TYPE=FIXED` use the same parser,
    with a measured difference ≤1.1% (§4); either choice has no performance impact, so pick by semantics.
-3. **Worker count**: 8~15 is already near saturation (1 GiB CSV: w8 4.54×, w15 4.59×); more workers only increase
+3. **Worker count**: 8~15 is already near saturation (1 GiB CSV: w8 4.15×, auto 4.24×); more workers only increase
    memory usage (8 MiB input queue per worker). It is recommended to start from the default value (CPU−1).
 4. **The larger the scale, the more parallelism pays off**: first version 32M rows 2.82× vs 1 GiB 1.33×, showing that the fixed overhead (DSM, bgworker
    startup, tens of milliseconds) is non-negligible for small files.

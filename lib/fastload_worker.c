@@ -1380,6 +1380,71 @@ pg_fastload_reader_main(Datum main_arg)
  * Field splitting + tuple formation for one owned record
  * ------------------------------------------------------------------------ */
 
+/*
+ * Fast path for a record that contains no quote mark: every delimiter is a
+ * plain field boundary, so the record can be copied once and cut in place
+ * instead of being walked byte by byte.  Real CSV input is dominated by such
+ * records (TPC-H lineitem is 100% plain).
+ *
+ * Returns false when the record needs the full state machine; in that case
+ * nothing but the scratch field buffer has been touched, so the caller can
+ * simply fall through to fl_parse_fields().
+ */
+static bool
+fl_parse_fields_plain(FastloadWorkerCtx *ctx, const char *rec, int len)
+{
+	FastloadParams *p = ctx->p;
+	char   *buf;
+	char   *cur;
+	char   *end;
+	int		fn = 0;
+
+	if (memchr(rec, p->quote, len) != NULL)
+		return false;
+
+	if (len + 1 > ctx->field_cap)
+	{
+		ctx->field_cap = len + 1;
+		ctx->field_buf = repalloc(ctx->field_buf, ctx->field_cap);
+	}
+
+	memcpy(ctx->field_buf, rec, len);
+	ctx->field_buf[len] = '\0';
+
+	buf = ctx->field_buf;
+	cur = buf;
+	end = buf + len;
+
+	for (;;)
+	{
+		char   *delim_pos = memchr(cur, p->delim, end - cur);
+		int		flen = (delim_pos ? delim_pos : end) - cur;
+
+		if (delim_pos)
+			*delim_pos = '\0';
+
+		if (fn >= ctx->fields_cap)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("extra data after last expected column")));
+
+		ctx->fields[fn].str = cur;
+		ctx->fields[fn].rawlen = flen;
+		/* No quotes here, so the raw length is also the field length. */
+		ctx->fields[fn].is_null =
+			(flen == p->null_len &&
+			 memcmp(p->nullstr, cur, p->null_len) == 0);
+		fn++;
+
+		if (delim_pos == NULL)
+			break;
+		cur = delim_pos + 1;
+	}
+
+	ctx->nfields = fn;
+	return true;
+}
+
 static void
 fl_parse_fields(FastloadWorkerCtx *ctx, char *rec, int len)
 {
@@ -1389,6 +1454,9 @@ fl_parse_fields(FastloadWorkerCtx *ctx, char *rec, int len)
 	int			str_start = 0;
 	int			i;
 	bool		in_quote = false;
+
+	if (fl_parse_fields_plain(ctx, rec, len))
+		return;
 
 	ctx->nfields = 0;
 	if (len + 1 > ctx->field_cap)

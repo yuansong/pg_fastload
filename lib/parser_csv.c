@@ -323,6 +323,103 @@ checkFieldIsNull(CSVParser *self, int field_num, int len)
 }
 
 /**
+ * @brief Split a record that contains no quote mark and no carriage return.
+ *
+ * The reference implementation below walks the record one character at a time
+ * so that it can honour quoting, escaping and CRLF.  When none of those
+ * constructs is present the field boundaries are plain delimiters, and the
+ * same field buffer can be produced by copying the record once and then
+ * replacing each delimiter with a NUL, which is several times cheaper than the
+ * per-character loop.  Plain records dominate real CSV input (TPC-H lineitem
+ * is 100% plain).
+ *
+ * The record itself is never modified: everything happens in the scratch field
+ * buffer, so the caller's record bytes stay available for error reporting.
+ *
+ * @param self [in/out] CSV parser
+ * @param rec  [in] record start (points into self->rec_buf)
+ * @param len  [in] record length, excluding the line terminator
+ * @return number of fields, or -1 when the record must go through the slow loop
+ */
+static int
+CSVPlainRecord(CSVParser *self, char *rec, int len)
+{
+	char   *p;
+	char   *end;
+	int		nfields = 0;
+	int		field_num = 0;
+
+	/*
+	 * Without target columns there is nothing to map fields onto, and FILTER
+	 * functions have their own argument list: both stay on the slow path.
+	 */
+	if (self->former.maxfields <= 0 || self->filter.funcstr)
+		return -1;
+
+	/* The field buffer never needs more than the record plus its NUL. */
+	if (len + 1 > self->buf_len)
+		return -1;
+
+	/*
+	 * One pre-scan decides eligibility: a quote mark would need dequoting and
+	 * a carriage return may terminate a record on its own.
+	 */
+	if (memchr(rec, self->quote, len) != NULL)
+		return -1;
+	if (memchr(rec, '\r', len) != NULL)
+		return -1;
+
+	/*
+	 * Copy the whole record once, then cut it in place.  A delimiter byte is
+	 * replaced by the NUL that terminates the previous field, so the field
+	 * pointers simply walk forward and no per-field memcpy is needed.
+	 */
+	memcpy(self->field_buf, rec, len);
+	self->field_buf[len] = '\0';
+
+	p = self->field_buf;
+	end = p + len;
+
+	while (p <= end)
+	{
+		char   *delim_pos;
+		int		flen;
+
+		delim_pos = memchr(p, self->delim, end - p);
+		flen = (delim_pos ? delim_pos : end) - p;
+
+		if (delim_pos)
+			*delim_pos = '\0';
+
+		self->fields[field_num] = p;
+
+		/*
+		 * NULL detection uses the raw field length, which is the same as the
+		 * dequoted length here because there are no quote marks to strip.
+		 */
+		checkFieldIsNull(self, field_num, flen);
+
+		nfields++;
+
+		/*
+		 * Extra columns keep overwriting the last target column, which is
+		 * what the slow loop does as well; parsing_field still counts them
+		 * so that the caller can raise "extra data after last expected
+		 * column".
+		 */
+		if (field_num + 1 < self->former.maxfields)
+			field_num++;
+
+		if (delim_pos == NULL)
+			break;
+		p = delim_pos + 1;
+	}
+
+	self->base.parsing_field = nfields;
+	return nfields;
+}
+
+/**
  * @brief Reads one record from the input file, converts each field's
  * character string representation into PostgreSQL internal representation
  * and store it to the line data buffer.
@@ -361,6 +458,11 @@ CSVParserRead(CSVParser *self, Checker *checker)
 	int			src;			/* Index to the next source */
 	int			field_num = 0;	/* Number of self->fields already parsed */
 	int			parsed_field;
+#ifdef ENABLE_FASTLOAD_PROFILE
+	instr_time	t_a;
+	instr_time	t_b;
+	instr_time	t_c;
+#endif
 
 	/*
 	 * If EOF found in the previous calls, returns zero.
@@ -418,6 +520,48 @@ skip_done:
 	}
 
 	self->cur = self->next;
+
+#ifdef ENABLE_FASTLOAD_PROFILE
+	INSTR_TIME_SET_CURRENT(t_a);
+#endif
+
+	/*
+	 * Fast path: when the record is already buffered and carries no quote
+	 * mark, its field boundaries are plain delimiters and can be located with
+	 * memchr().  Everything else - a quoted or multiline record, a lone CR, or
+	 * a final line without a newline - falls through to the reference loop
+	 * below, which also owns buffer refills.
+	 */
+	if (self->used_len > 0)
+	{
+		int		avail = self->used_len - (self->cur - self->rec_buf);
+		char   *eol;
+
+		if (avail > 0 && (eol = memchr(self->cur, '\n', avail)) != NULL)
+		{
+			int		len = eol - self->cur;
+			int		nf;
+			bool	has_cr = (len > 0 && self->cur[len - 1] == '\r');
+
+			if (has_cr)
+				len--;
+
+			if ((nf = CSVPlainRecord(self, self->cur, len)) >= 0)
+			{
+				/*
+				 * Only touch the buffer once the record is known to be plain:
+				 * a fallback must leave every byte intact for the slow loop.
+				 */
+				if (has_cr)
+					eol[-1] = '\0';	/* the slow loop ends the record here */
+				*eol = '\0';
+				self->next = eol + 1;
+				if (len > 0)
+					self->base.count++;
+				goto record_parsed;
+			}
+		}
+	}
 
 	/*
 	 * Initialize variables related to fied data.
@@ -665,6 +809,12 @@ skip_done:
 			}
 		}
 	}
+record_parsed:
+
+#ifdef ENABLE_FASTLOAD_PROFILE
+	INSTR_TIME_SET_CURRENT(t_b);
+	INSTR_TIME_ACCUM_DIFF(prof_csv_split, t_b, t_a);
+#endif
 
 	/*
 	 * If no corresponding (closing) quote mark is found when a record parse terminates, it's an error. 
@@ -714,17 +864,31 @@ skip_done:
 
 	/* Convert it to server encoding. */
 	parsed_field = self->base.parsing_field;
-	for (i = 0; i < parsed_field; i++)
-	{
-		if (self->fields[i] == NULL)
-			continue;
 
-		self->base.parsing_field = i + 1;
-		self->fields[i] = CheckerConversion(checker, self->fields[i]);
+	/*
+	 * Without an ENCODING option there is nothing to convert and nothing to
+	 * validate, so skip the per-field walk entirely: on a 16-column file that
+	 * is 118 million calls that would all return their argument unchanged.
+	 */
+	if (checker->check_encoding)
+	{
+		for (i = 0; i < parsed_field; i++)
+		{
+			if (self->fields[i] == NULL)
+				continue;
+
+			self->base.parsing_field = i + 1;
+			self->fields[i] = CheckerConversion(checker, self->fields[i]);
+		}
 	}
 
 	ExtractValuesFromCSV(self, parsed_field);
 	self->base.parsing_field = -1;
+
+#ifdef ENABLE_FASTLOAD_PROFILE
+	INSTR_TIME_SET_CURRENT(t_c);
+	INSTR_TIME_ACCUM_DIFF(prof_csv_value, t_c, t_b);
+#endif
 
 	if (self->filter.funcstr)
 		tuple = FilterTuple(&self->filter, &self->former,

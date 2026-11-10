@@ -14,7 +14,7 @@ A load is split into four stages, and that split is the backbone of the whole pa
 | # | Stage | Work | Code |
 |---|---|---|---|
 | ① | Read input | `SourceRead()` pulls bytes from INPUT | `lib/source.c` → `CSVParserRead()` |
-| ② | Parse records | record-boundary state machine + field splitting, unquoting/escaping | `lib/parser_csv.c` |
+| ② | Parse records | record-boundary scan + field splitting, unquoting/escaping | `lib/parser_csv.c` |
 | ③ | Form tuples | `CheckerConversion()` → `TupleFormerValue()` (column input functions) → `TupleFormerTuple()` (`heap_form_tuple`) | `lib/reader.c`, `lib/parser_csv.c` |
 | ④ | Insert | `WriterInsert()`, DIRECT / BUFFERED | `lib/writer_*.c` |
 
@@ -299,6 +299,23 @@ Notes:
   `unterminated CSV quoted field` is raised.
 - **Long records across chunks**: the record buffer starts at 64 KiB and doubles, capped at
   `FL_REC_MAX = 256 MiB`.
+
+### 6.1a Field splitting: two tiers for the same semantics
+
+The record boundary above answers *where a record ends*. Turning the bytes into fields happens in a
+second step, and that step has two implementations with identical output:
+
+| Tier | When | How | Cost per 1 GiB |
+|---|---|---|---|
+| Fast (`CSVPlainRecord()` in the serial path, `fl_parse_fields_plain()` in the workers) | the record contains **no quote mark and no `\r`** | one `memchr('\n')`, one pre-scan for quote/CR, one copy of the record into the scratch field buffer, then each delimiter byte replaced in place by the previous field's NUL | 0.90 s |
+| Reference (`CSVParserRead()` loop / `fl_parse_fields()` loop) | quoted fields, escaped quotes, embedded CRLF, lone CR, unterminated quote, `FILTER`, no target columns | the byte-at-a-time state machine that unquotes and escapes while building the field buffer | 1.92 s |
+
+The fast tier never touches the record buffer, so `ParserDumpRecord()`, the `strlen(self->cur)` check and
+buffer refills still see the original bytes; the counters `field_num`, `parsing_field` and `base.count`
+are reproduced exactly, including "extra columns overwrite the last target column" and "a blank line is
+one NULL field". Whether a record is eligible is decided *before* any byte is modified, which is what
+makes the fallback safe (the 90-assertion suite pins exactly that with its quoted / lone-CR /
+cross-chunk cases).
 
 ### 6.2 Routing: chunk round-robin by byte count
 
