@@ -30,7 +30,7 @@
 | Ordering bias | Multiple rounds alternate forward / reverse order, take the **median** |
 | CHECKPOINT interference | `CHECKPOINT` is run **out-of-timing** — otherwise the previous round's dirty-page flush would fall into the next round, which once produced a false speedup of 5.58× |
 | Content correctness | `count(*) \|\| sum(hash_record_extended(t,0))`, independent of physical insertion order |
-| Equivalence anchor | `PARALLEL=OFF` runs the upstream algorithm; it is compared against upstream `pg_bulkload 3.1.23` and against `COPY ... FROM` (§3, §3.1) so that any change of the serial path shows up as a number, not an opinion. That same `COPY` batch supplies the `vs COPY` column used in every results table. |
+| Equivalence anchor | `PARALLEL=OFF` runs the upstream algorithm; it is compared against upstream `pg_bulkload 3.1.23` and against `COPY ... FROM` (§3, §3.1) so that any change of the serial path shows up as a number, not an opinion. That same `COPY` batch supplies the `vs COPY` column used in every results table. The full loader × writer-mode × format matrix (§3.2, §4.5) extends the anchor set with upstream `WRITER=BUFFERED` / `PARALLEL` and `COPY` on all three formats, from `bench_loader_matrix.py` (3 alternating rounds, medians). |
 | Index | Unless otherwise specified, the benchmark table has **no index** (the gain from W-3a comes precisely from this scenario) |
 
 Configuration set: `fl_off` (`PARALLEL=OFF`, serial control), `fl_w1`, `fl_w2`, `fl_w4`, `fl_w8`, `fl_w15`,
@@ -120,6 +120,49 @@ Reading it:
 4. `synchronous_commit` does not enter the picture: `COPY` into an UNLOGGED table is still the slower one, so the gap is
    CPU per row, not durability.
 
+### 3.2 Full Loader × Writer-Mode × Format Matrix (2026-11-10, 16 vCPU, Warm Cache, Median of 3)
+
+Every loader configuration on every input format, plus `COPY` where the format allows it
+(`COPY` is text/CSV only — BINARY/FIXED reuse the CSV `COPY` figure as a common yardstick, marked ‡):
+
+| Config | CSV | BINARY | FIXED |
+|---|---|---|---|
+| upstream `WRITER=BUFFERED` | 9.22 | 4.08§ | 3.95§ |
+| upstream `WRITER=DIRECT` | 6.98 | 1.62 | 1.59 |
+| upstream `WRITER=PARALLEL` | 6.63 | 1.39 | 1.42 |
+| `pg_fastload` `PARALLEL=OFF` | 5.84 | 1.58 | 1.63 |
+| `pg_fastload` `PARALLEL_WORKERS=8` | 1.42 | **0.88** | **0.90** |
+| `pg_fastload` `auto` (15) | **1.40** | 0.90 | 0.93 |
+| `COPY ... FROM`‡ | 8.34 | (8.34) | (8.34) |
+| `COPY ... FROM` UNLOGGED‡ | 8.40 | (8.40) | (8.40) |
+
+Seconds; CSV is 7,375,042 rows, BINARY/FIXED 10,737,418 rows of the same 1 GiB payload.
+
+Derived ratios:
+
+| Config | CSV vs `COPY` | BINARY vs `COPY`‡ | FIXED vs `COPY`‡ | pg_fastload best vs upstream best | pg_fastload best vs upstream worst |
+|---|---|---|---|---|---|
+| `fl_w8` | 5.87× | 9.48× | 9.27× | **1.58×** (0.88 vs 1.39) | 4.64× (0.88 vs 4.08) |
+| `fl_auto` | 5.96× | 9.27× | 8.97× | 1.54× | 4.58× |
+
+Findings:
+
+1. **Upstream's fastest mode is `WRITER=PARALLEL`, not `DIRECT`** — 1.39/1.42 s on BINARY/FIXED vs 1.62/1.59 for
+   DIRECT (independent processes write without the single-writer bottleneck). Earlier comparisons that only used
+   upstream `DIRECT` under-measured the upstream baseline; the honest gap to the *best* upstream mode is still
+   **1.58×** for pg_fastload, and **4.4–4.6×** to its slowest.
+2. `COPY` cannot load BINARY/FIXED at all, so the ‡ column is the CSV `COPY` rate over the *same bytes* written in
+   a different format — an order-of-magnitude yardstick (9.3–9.5×), not a like-for-like race.
+3. The upstream `BUFFERED` row shows why writer mode matters more for fixed-length than for CSV: text→binary
+   conversion was already done offline in the file, so `BUFFERED`'s double-write penalty lands on fewer CPU-bound
+   stages.
+4. All medians in this matrix are free of host stalls except where marked §; §5 documents the hypervisor
+   30 s-stall window that produced occasional 31–36 s outliers, which the medians exclude.
+
+§ `up_buffered` on BINARY/FIXED is bimodal on this host: 3 of 6 rounds landed in the hypervisor stall window
+(28–34 s), 3 in clean windows. The table uses the median of the clean re-measurement batch
+(`bench_buffered_clean.py`): BINARY 4.08 s, FIXED 3.95 s. The CSV figure (9.22 s) was clean in all rounds.
+
 
 ---
 
@@ -181,6 +224,25 @@ As a reference for the same hardware, CSV `COPY ... FROM` takes 8.32 s for a com
 **Round noise**: Of the 42 timing units this run, 5 were polluted by 19–31 s host hypervisor jitter (both serial and
 parallel, unrelated to the configuration); all were removed by the median; the rounds judged as polluted retain their raw values in `bench_binary_fixed.json`
 for review.
+
+### 4.5 Fixed-Length Against Every Upstream Writer Mode (2026-11-10)
+
+The same matrix run as §3.2 restricted to `TYPE=BINARY` / `TYPE=FIXED` — upstream pg_bulkload 3.1.23 in all three
+writer modes vs pg_fastload, `COPY` rows shown only as the CSV yardstick (‡):
+
+| Config | `BINARY` | `FIXED` | vs `COPY`‡ |
+|---|---|---|---|
+| upstream `WRITER=BUFFERED` | 4.08§ | 3.95§ | 2.04× / 2.11× |
+| upstream `WRITER=DIRECT` | 1.62 | 1.59 | 5.15× / 5.25× |
+| upstream `WRITER=PARALLEL` | 1.39 | 1.42 | 6.00× / 5.87× |
+| `pg_fastload` `PARALLEL=OFF` | 1.58 | 1.63 | 5.28× / 5.12× |
+| `pg_fastload` `fl_w8` | **0.88** | **0.90** | 9.48× / 9.27× |
+| `pg_fastload` `auto` (15) | 0.90 | 0.93 | 9.27× / 8.97× |
+
+**Upstream's own fastest writer mode is `PARALLEL`** (1.39 / 1.42 s, ~13% ahead of its `DIRECT`), so the honest
+upstream baseline for fixed-length is 1.39 s, not 1.62 s. Against *that*, pg_fastload's 0.88 s is **1.58×**; against
+upstream's slowest mode it is **4.6×**. §4.4's conclusions are unchanged: BINARY ≡ FIXED within noise on both
+sides, and the parallel ceiling is set by the fixed per-load cost, not by parsing.
 
 ---
 

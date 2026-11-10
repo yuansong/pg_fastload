@@ -30,7 +30,7 @@
 | 顺序偏差 | 多轮采用正序 / 倒序轮换，取**中位数** |
 | checkpoint 干扰 | `CHECKPOINT` 在**计时之外**执行——否则上一轮脏页刷盘会落入下一轮，曾造出 5.58× 的假加速比 |
 | 内容正确性 | `count(*) \|\| sum(hash_record_extended(t,0))`，与物理插入顺序无关 |
-| 等价性锚点 | `PARALLEL=OFF` 即上游算法本体；与上游 `pg_bulkload 3.1.23` 和 `COPY ... FROM` 同条件对比（§3、§3.1），串行路径的任何变化都必须以数字体现，而不是结论；同一 `COPY` 批次也提供各结果表里的「相对 `COPY`」列 |
+| 等价性锚点 | `PARALLEL=OFF` 即上游算法本体；与上游 `pg_bulkload 3.1.23` 和 `COPY ... FROM` 同条件对比（§3、§3.1），串行路径的任何变化都必须以数字体现，而不是结论；同一 `COPY` 批次也提供各结果表里的「相对 `COPY`」列。全 loader×写入模式×格式矩阵（§3.2、§4.5）把锚点扩展到上游 `WRITER=BUFFERED`/`PARALLEL` 与三种格式下的 `COPY`，数据来自 `bench_loader_matrix.py`（3 轮交替取中位） |
 | 索引 | 除非特别说明，基准表**无索引**（W-3a 的收益正来自此场景） |
 
 配置集合：`fl_off`（`PARALLEL=OFF`，串行控制）、`fl_w1`、`fl_w2`、`fl_w4`、`fl_w8`、`fl_w15`、
@@ -120,6 +120,48 @@
 4. `synchronous_commit` 也不是差异来源：对 UNLOGGED 表的 `COPY` 仍然更慢，差距在每行 CPU，
    不在持久化。
 
+### 3.2 全 Loader × 写入模式 × 格式矩阵（2026-11-10，16 vCPU，热缓存，3 轮中位）
+
+每个 loader 配置 × 每种输入格式，外加格式允许时的 `COPY`（`COPY` 只支持文本/CSV——
+BINARY/FIXED 行以同一份字节的 CSV `COPY` 数值作公共标尺，标 ‡）：
+
+| 配置 | CSV | BINARY | FIXED |
+|---|---|---|---|
+| 上游 `WRITER=BUFFERED` | 9.22 | 4.08§ | 3.95§ |
+| 上游 `WRITER=DIRECT` | 6.98 | 1.62 | 1.59 |
+| 上游 `WRITER=PARALLEL` | 6.63 | 1.39 | 1.42 |
+| `pg_fastload` `PARALLEL=OFF` | 5.84 | 1.58 | 1.63 |
+| `pg_fastload` `PARALLEL_WORKERS=8` | 1.42 | **0.88** | **0.90** |
+| `pg_fastload` `auto`（15） | **1.40** | 0.90 | 0.93 |
+| `COPY ... FROM`‡ | 8.34 | （8.34） | （8.34） |
+| `COPY ... FROM` UNLOGGED‡ | 8.40 | （8.40） | （8.40） |
+
+单位秒；CSV 为 7,375,042 行，BINARY/FIXED 为同一 1 GiB 载荷的 10,737,418 行。
+
+派生比值：
+
+| 配置 | CSV vs `COPY` | BINARY vs `COPY`‡ | FIXED vs `COPY`‡ | pg_fastload 最优 vs 上游最优 | pg_fastload 最优 vs 上游最差 |
+|---|---|---|---|---|---|
+| `fl_w8` | 5.87× | 9.48× | 9.27× | **1.58×**（0.88 vs 1.39） | 4.64×（0.88 vs 4.08） |
+| `fl_auto` | 5.96× | 9.27× | 8.97× | 1.54× | 4.58× |
+
+结论：
+
+1. **上游最快的模式是 `WRITER=PARALLEL`，不是 `DIRECT`**——BINARY/FIXED 上 1.39/1.42 s，
+   比 DIRECT 的 1.62/1.59 还快（独立进程写盘，没有单写者瓶颈）。只拿上游 `DIRECT` 当
+   基线的对比低估了上游；对*上游最优*模式的诚实差距是 pg_fastload **1.58×**，对上游
+   *最差*模式是 **4.4–4.6×**。
+2. `COPY` 根本读不了 BINARY/FIXED，所以 ‡ 列是 CSV `COPY` 对**同一份字节**换一种格式
+   的量级标尺（9.3–9.5×），不是同格式竞赛。
+3. 上游 `BUFFERED` 行说明写入模式对定长的影响比 CSV 更大：文本→二进制的转换已在
+   造文件时完成，`BUFFERED` 的双写惩罚落在更少的 CPU 受限阶段上。
+4. 除 § 标注外，本矩阵的中位数均不含宿主停顿；§5 记录的 hypervisor 30 s 停顿窗口
+   产生了偶发 31–36 s 离群值，已由中位数剔除。
+
+§ BINARY/FIXED 上的上游 `up_buffered` 在本机呈双峰：6 轮中 3 轮落入 hypervisor 停顿
+窗口（28–34 s），3 轮干净。表中取干净补测批次（`bench_buffered_clean.py`）的中位：
+BINARY 4.08 s、FIXED 3.95 s。CSV 数值（9.22 s）各轮均干净。
+
 
 ---
 
@@ -187,6 +229,25 @@ CSV，那是另一个文件、另一种每行工作量，得到的倍数毫无�
 **轮次噪声**：本次 42 个计时单元里有 5 个被宿主 hypervisor 层的 19–31 s 卡顿污染（串行与
 并行都有，与该配置无关），全部被中位数剔除；被判为污染的轮次在 `bench_binary_fixed.json`
 里保留原始值，便于复核。
+
+### 4.5 定长对上游全部写入模式（2026-11-10）
+
+与 §3.2 同一批次矩阵、只取 `TYPE=BINARY`/`TYPE=FIXED`——上游 pg_bulkload 3.1.23 三种
+写入模式对 pg_fastload，`COPY` 行仅作 CSV 标尺（‡）：
+
+| 配置 | `BINARY` | `FIXED` | vs `COPY`‡ |
+|---|---|---|---|
+| 上游 `WRITER=BUFFERED` | 4.08§ | 3.95§ | 2.04× / 2.11× |
+| 上游 `WRITER=DIRECT` | 1.62 | 1.59 | 5.15× / 5.25× |
+| 上游 `WRITER=PARALLEL` | 1.39 | 1.42 | 6.00× / 5.87× |
+| `pg_fastload` `PARALLEL=OFF` | 1.58 | 1.63 | 5.28× / 5.12× |
+| `pg_fastload` `fl_w8` | **0.88** | **0.90** | 9.48× / 9.27× |
+| `pg_fastload` `auto`（15） | 0.90 | 0.93 | 9.27× / 8.97× |
+
+**上游自己的最快写入模式是 `PARALLEL`**（1.39 / 1.42 s，比其 `DIRECT` 快约 13%），所以
+定长格式上诚实的上游基线是 1.39 s 而非 1.62 s。对*这个*基线，pg_fastload 的 0.88 s 是
+**1.58×**；对上游最慢模式是 **4.6×**。§4.4 的结论不变：两侧都是 BINARY ≡ FIXED（噪声内），
+并行天花板由装载的固定成本决定、与解析无关。
 
 ---
 

@@ -49,6 +49,7 @@
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/portal.h"
+#include "utils/snapmgr.h"
 #include "utils/timestamp.h"	/* TimestampTzGetDatum (PG 19 no longer pulls it in) */
 
 #include "binary.h"
@@ -124,6 +125,7 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 	double			duration;
 	bool			binary;
 	int				fieldno = -1;
+	int64			rows_hint = 0;	/* pg_class.reltuples for TABLE= exports */
 
 	/* Same rule as pg_fastload(): the output file is written as the server. */
 	if (!superuser())
@@ -149,7 +151,42 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 	LoggerLog(INFO, "\npg_fastload export %s on %s\n\n",
 			  PG_FASTLOAD_VERSION, start);
 
+	/*
+	 * Audit line: every byte of this file comes from exactly one MVCC
+	 * snapshot.  The serial path reads through the caller's active snapshot
+	 * (read-only SPI cursor); the parallel path serialises that same snapshot
+	 * into the DSM segment and every worker restores it (lib/export_parallel.c).
+	 * Recording xmin/xmax/cid makes "which snapshot produced this file"
+	 * answerable from the log alone.
+	 */
+	{
+		Snapshot	snap = GetActiveSnapshot();
+
+		LoggerLog(INFO, "snapshot: xmin=%u xmax=%u cid=%u\n",
+				  snap->xmin, snap->xmax, snap->curcid);
+	}
+
 	DumpExportParams(&eo, wt, query);
+
+	/*
+	 * A TABLE= export can estimate its total row count from pg_class.reltuples
+	 * (populated by ANALYZE / autovacuum).  The estimate feeds the progress
+	 * view's percent and ETA columns; a QUERY= export has no such estimate and
+	 * keeps reporting rows and a rate only.
+	 */
+	if (eo.table != NULL)
+	{
+		Oid			hrelid = ResolveExportRelid(eo.table);
+
+		if (OidIsValid(hrelid))
+		{
+			Relation	hrel = table_open(hrelid, AccessShareLock);
+
+			if (hrel->rd_rel->reltuples > 0)
+				rows_hint = (int64) hrel->rd_rel->reltuples;
+			table_close(hrel, AccessShareLock);
+		}
+	}
 
 	PG_TRY();
 	{
@@ -170,7 +207,7 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 		pinfo.notice = eo.progress_notice;
 		pinfo.interval_ms = eo.progress_interval;
 		pinfo.limit_rows = eo.limit;
-
+		pinfo.total_rows_hint = rows_hint;
 
 		/*
 		 * Parallel attempt first: N query workers scan disjoint block ranges
@@ -768,6 +805,9 @@ ExportParallelAttempt(ExportOptions *eo, Writer *wt, TupleDesc *desc,
 	pinfo.notice = eo->progress_notice;
 	pinfo.interval_ms = eo->progress_interval;
 	pinfo.limit_rows = eo->limit;
+	/* The relation is already open here; reltuples is one syscache-free read. */
+	if (rel->rd_rel->reltuples > 0)
+		pinfo.total_rows_hint = (int64) rel->rd_rel->reltuples;
 
 	PG_TRY();
 	{

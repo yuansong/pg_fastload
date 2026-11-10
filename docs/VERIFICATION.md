@@ -387,7 +387,29 @@ Load-side suites are unaffected by all of this: CSV 90/90 and fixed-length 44/44
 
 ---
 
-## 13. Conclusion
+## 13. `SKIP_INDEX` and Export Progress Verification (2026-11-10)
+
+`verify_skipindex_export.py` on PG 18.6, **20/20 PASS**:
+
+- **S1 (drop + rebuild round trip)**: a table with two plain btree indexes loads with
+  `SKIP_INDEX=ON` — the NOTICE reports 2 dropped indexes, the two verbatim `CREATE INDEX`
+  statements are printed, `pg_index` confirms 0 indexes remain during load, row count 500,000
+  and the order-independent digest match the source; re-running the printed DDLs restores
+  exactly 2 indexes.
+- **S2 (guard)**: `SKIP_INDEX=ON` + primary-key table + `DUP_ERRORS` → `ERROR ... cannot be
+  combined with DUP_ERRORS`, load refused.
+- **S3 (no-index no-op)**: `SKIP_INDEX=ON` on an index-less table loads normally with no
+  drop NOTICE; digest matches.
+- **P1 (export percent/ETA)**: a `TABLE=` CSV export with `PROGRESS_NOTICE=ON` streams
+  `progress: NN.N% of N rows` lines with ETA, closing `100.0% | done`, output byte-size
+  consistent with the source.
+- **P2 (QUERY= export)**: percent stays absent (rows/rate lines only), LIMIT-derived
+  percentages still work.
+
+Regressions after the change: `fastload_verify.py` **90/90**, `fastload_verify_fixed.py`
+**44/44**; build rc=0, zero warnings in added code.
+
+## 14. Conclusion
 
 The current version meets the delivery criteria across nine dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8, export 39/39, parallel export 33/33 on each of five majors), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (8/8 view checks on five majors, exact final numbers, no measurable cost), export (CSV/BINARY/FIXED with CSV byte-identical to `COPY` on the serial path; 9.60× parallel scaling), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
 

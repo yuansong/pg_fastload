@@ -38,6 +38,7 @@ reference set in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - `PARALLEL=ON` with `PARALLEL_WORKERS=1..64` (default = online CPUs − 1); parallel CSV *and* parallel fixed length.
 - The upstream writer modes untouched: `WRITER=DIRECT` / `BUFFERED` / `PARALLEL`.
 - `SKIP` / `LIMIT`, `DUPLICATE_*` policies, `FILTER`, `FORCE_NOT_NULL`, `NULLIF`, `ENCODING`, `TRUNCATE=YES`, `MULTI_PROCESS`.
+- `SKIP_INDEX=ON` drops the target's indexes for the load and prints the verbatim `CREATE INDEX` statements to re-create them — ≈half the load time on an indexed table when you rebuild anyway.
 - Per-row tolerance with `PARSE_ERRORS` + `PARSE_BADFILE` (serial path; see [§6](#6-constraints-you-should-know)).
 
 **Export**
@@ -47,7 +48,7 @@ reference set in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 **Observability**
 
-- Every load publishes progress; any session reads it through `pgfastload.pg_fastload_progress` (`percent`, byte/row rates, `eta_seconds`), or streams it with `PROGRESS_NOTICE=ON`.
+- Every load publishes progress; any session reads it through `pgfastload.pg_fastload_progress` (`percent`, byte/row rates, `eta_seconds`), or streams it with `PROGRESS_NOTICE=ON`. Exports use the same view: a `TABLE=` export shows `percent`/`eta_seconds` from the `reltuples` estimate, and the log records the snapshot fingerprint (`xmin/xmax/cid`) for auditability.
 - `USE_PROFILE=1` builds print stage groups `GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER`, including per-worker `SCAN` / `FORM` / `IPC`.
 - Per-worker row counts plus a `CPU x/y sec elapsed z sec` line in every load log.
 
@@ -124,6 +125,7 @@ the reference comparisons and cold-cache results: [docs/BENCHMARK.md](docs/BENCH
 | Automatic downgrade with an `INFO` line | — | ✓ (13 cases, see [§5](#5-automatic-downgrade)) |
 | Stage-level profiling | partial | ✓ GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER, including per-worker SCAN/FORM/IPC |
 | Skip spool work on unindexed tables | ✗ | ✓ (`SpoolerInsert()` early return, ~0.28 s/1 GiB) |
+| Skip index maintenance during load | ✗ | ✓ (`SKIP_INDEX=ON`: drop + verbatim rebuild DDLs, ≈half the load time on an indexed table) |
 | Per-row error tolerance + badfile | ✓ | ✓ (serial path; the parallel path fails the load instead) |
 | Load progress reporting | ✗ | ✓ (published for every load; read it from any session via `pgfastload.pg_fastload_progress` — see [USER_MANUAL §12.4](docs/USER_MANUAL.md#124-load-progress)) |
 | Table export (CSV / BINARY / FIXED) | ✗ | ✓ (`pgfastload.pg_fastload_export()`; parallel by default for `TABLE=`, 9.60× on 16 cores; CSV is byte-identical to `COPY ... TO` on the serial path — see [§4.6](#46-the-other-direction-export-a-table-to-csv--binary--fixed)) |

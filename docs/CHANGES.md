@@ -783,6 +783,44 @@ quoted/lone-CR/cross-chunk/blank-line/extra-column cases that pin the slow-path 
 is clean on **15.19 / 16.15 / 17.11 / 18.6 / 19rc1**; the 1 GiB digest is
 `7375042|9258128314029119699254` on both `PARALLEL=OFF` and `auto`.
 
+## 22. `SKIP_INDEX=ON`: skip index maintenance during load (2026-11-10)
+
+DIRECT loads keep indexes via the spool batch build, which costs ≈1.9 s per GiB on an indexed
+table (measured: 1.99 s without index vs 3.87 s with one btree — the index is ~50% of the load
+time). Users who plan to rebuild anyway can now pass `SKIP_INDEX=ON`:
+
+- `pg_fastload.c` enumerates the target's indexes with `SkipTargetIndexes()` right after
+  `TRUNCATE` and **before** `WriterInit` (the writer opens the index contexts in `SpoolerOpen`,
+  so the drop must happen earlier). Each index is dropped with `DROP INDEX` inside the load
+  transaction — a failed load rolls the drops back with everything else, so the table is never
+  left without its indexes.
+- All collected `CREATE INDEX` statements (verbatim, including `WHERE` partials and
+  collations) are printed at the end to `LOGFILE` and as a `NOTICE`, so the rebuild is
+  copy-paste; the NOTICE also names how many indexes were dropped.
+- **Guard**: `SKIP_INDEX` is rejected with `ERROR` when combined with `ON_DUPLICATE` /
+  `DUP_ERRORS` — both need the unique indexes that `SKIP_INDEX` drops. A no-op `ON_DUPLICATE`
+  default is fine. Tables without indexes load unchanged (`INFO` says nothing was dropped).
+
+## 23. Export progress `percent`/`eta_seconds` + snapshot audit trail (2026-11-10)
+
+- `ProgressInfo` gains `total_rows_hint`. `pg_fastload_export()` fills it from
+  `pg_class.reltuples` for `TABLE=` exports (serial path opens the relation briefly for
+  `AccessShareLock`; the parallel path reuses the already-open `rel->rd_rel->reltuples`);
+  `QUERY=` exports keep it 0 (no estimate possible). `ProgressInit()` now prefers a finite
+  `LIMIT`, then the hint, so the existing percent-by-rows and ETA logic in `progress.c`
+  lights up for exports with zero new parameters. The view clamps the running percentage at
+  99.9% since `reltuples` is only an estimate; the closing line is always `100.0% | done`.
+- The export log now records the snapshot fingerprint (`snapshot: xmin=… xmax=… cid=…`), making
+  "which MVCC snapshot produced this file" answerable from the `LOGFILE` alone. The snapshot
+  semantics themselves (one snapshot, serialized into DSM for parallel workers, pinned for the
+  export's lifetime) were already correct — see USER_MANUAL §18.8.
+
+### 23.1 Verification
+
+`verify_skipindex_export.py` **20/20** (drop + NOTICE + DDL round trip + digest match,
+conflict guard, no-index no-op, percent/ETA NOTICE stream, QUERY= keeps percent NULL), plus the
+standard regressions `fastload_verify.py` **90/90** and `fastload_verify_fixed.py` **44/44**.
+
 ---
 
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

@@ -296,7 +296,29 @@ Every keyword can also be supplied on the command line with `-o KEY=VALUE`
 |---|---|---|---|
 | `OUTPUT` / `TABLE` | `schema.table` | required | target table; table name only, **no database name** (the connection decides) |
 | `TRUNCATE` | `YES` / `NO` | `NO` | truncate the target before loading |
+| `SKIP_INDEX` | `YES` / `NO` | `NO` | drop the target's secondary indexes for the load; rebuild them yourself afterwards (see below) |
 | `VERBOSE` | `YES` / `NO` | `NO` | more detailed progress logging |
+
+**`SKIP_INDEX=ON`.** Maintaining indexes during a load costs about as much as
+the load itself (measured ≈1.9 s/GiB for one btree, roughly half of an indexed
+load). `SKIP_INDEX=ON` trades that away for speed with an explicit contract:
+
+* **Before loading**, every *plain* secondary index of the target table is
+  dropped (inside the load's own transaction — a failed load rolls the drops
+  back together with the rows, so nothing is lost on error).
+* **After a successful load** the loader prints the matching `CREATE INDEX`
+  statements — one `NOTICE` per statement, plus a copy in the `LOGFILE` — and
+  it is **your job** to run them. Until you do, queries that use those indexes
+  are not possible (they no longer exist); there is no silently-corrupt state.
+* Constraint-backed indexes (`PRIMARY KEY` / `UNIQUE` / `EXCLUSION`
+  constraints) are **refused** with an ERROR: the loader will not remove a
+  constraint silently. Drop the constraint, load, and re-create it yourself.
+* `SKIP_INDEX` cannot be combined with `DUP_ERRORS` (duplicate tolerance needs
+  the unique-index spool merge). `ON_DUPLICATE_KEEP` is accepted but inert
+  without a unique index; dropping a unique index produces a `WARNING`.
+* Works with both `WRITER=DIRECT` and `WRITER=BUFFERED`, serial or parallel;
+  with the indexes gone, the spool stage disappears from the load path on its
+  own.
 
 ### 6.4 CSV parsing (`TYPE=CSV`)
 
@@ -670,8 +692,8 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 | `elapsed_seconds` | since `started` |
 | `rows` | rows the leader has inserted — the number the statement will report |
 | `bytes_read`, `total_bytes` | bytes consumed by the reader / size of the input file (`0` when unknown: STDIN, pipe). For an export `bytes_read` counts bytes **written** and `total_bytes` is always `0` |
-| `total_rows` | `LIMIT`, `0` when unlimited |
-| `percent` | `rows ÷ total_rows` when `LIMIT` is finite, else `bytes_read ÷ total_bytes`, else `NULL` |
+| `total_rows` | `LIMIT` when finite; otherwise, for a `TABLE=` export, the `pg_class.reltuples` estimate of the source table; `0` when unknown |
+| `percent` | `rows ÷ total_rows` when a row total exists (finite `LIMIT`, or a `TABLE=` export), else `bytes_read ÷ total_bytes`, else `NULL` |
 | `bytes_per_second`, `rows_per_second` | averages since the load started |
 | `eta_seconds` | remaining work ÷ rate, `NULL` when the percentage is unknown |
 | `interval_ms` | publishing cadence |
@@ -1052,16 +1074,59 @@ Throughput and the measured scaling curve are in
 ### 18.7 Progress
 
 An export publishes into the same view ([§12.4](#124-load-progress)) with `direction = export`,
-`infile` set to the output file and `bytes_read` counting written bytes. The total is unknown, so
-`percent` and `eta_seconds` are `NULL` while `rows_per_second` and `bytes_per_second` work:
+`infile` set to the output file and `bytes_read` counting written bytes:
 
 ```
- pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | bytes_read
-------+---------+----------------+-----------+------------+--------+---------+---------+------------
- 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
+ pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | percent | eta_seconds | bytes_read
+------+---------+----------------+-----------+------------+--------+---------+---------+---------+-------------+------------
+ 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |    50.0 |       3.42  |  536870912
 ```
 
-### 18.8 Limitations
+* **A `TABLE=` export shows `percent` and `eta_seconds`**: the total row count
+  is estimated from `pg_class.reltuples` (kept fresh by `ANALYZE`/autovacuum),
+  so the view behaves like a load's: percent climbs to 99.9%, ETA counts down,
+  and the closing `NOTICE` line says `100.0% | done` regardless of how the
+  estimate compares with the actual row count. The estimate is only as good as
+  the last `ANALYZE` — after a big bulk load with no analyze yet, `reltuples`
+  may be far off, and the percentage with it.
+* A `QUERY=` export has no row estimate; it reports `rows`, the two rates and
+  `elapsed_seconds`, with `percent`/`eta_seconds` = `NULL`.
+* Refresh cadence is `PROGRESS_INTERVAL` (default 1000 ms, minimum 100 ms);
+  a parallel export's leader republishes on the same cadence from the writer's
+  counters.
+
+### 18.8 Snapshot consistency (concurrent writes, export → load round trip)
+
+Every exported byte comes from **one MVCC snapshot**; a long export is not a
+series of reads that each see a different table.
+
+* **Creation.** The scan uses the caller's active snapshot: in `READ
+  COMMITTED` that is the statement snapshot taken when `pg_fastload_export()`
+  started, in `REPEATABLE READ`/`SERIALIZABLE` the transaction snapshot. Rows
+  committed after that instant are invisible to the export, whichever worker
+  reads which block.
+* **Transfer.** For a parallel export the leader serialises this exact
+  snapshot (`SerializeSnapshot()`) into the DSM segment before launching the
+  workers; every worker restores it (`RestoreSnapshot()` + `PushActiveSnapshot`)
+  instead of taking its own, so N workers + writer all see the same database
+  state — no row is skipped or duplicated at block-range boundaries by a
+  commit happening mid-export.
+* **Lifecycle.** The snapshot lives inside the pinned DSM segment for the
+  duration of the export; workers pop it when they finish and the segment is
+  destroyed when the export ends. A long export keeps the snapshot alive and
+  therefore delays `VACUUM` cleanup past `oldest xmin` ([§18.9](#189-limitations)).
+* **Audit trail.** The export log records the snapshot fingerprint
+  (`snapshot: xmin=… xmax=… cid=…`), so "which snapshot produced this file"
+  is answerable from the `LOGFILE` alone.
+* **The load side needs no snapshot merge.** A load reads a *file* (immutable
+  once written) and holds `AccessExclusiveLock` on the target, so no other
+  session can write the table mid-load; correctness is enforced by the
+  transaction, not by a snapshot. For the export → load round trip, verify
+  byte-level consistency with the order-independent digest
+  (`count(*) || sum(hash_record_extended(t,0))`) on both sides —
+  [VERIFICATION §5](VERIFICATION.md) shows the procedure.
+
+### 18.9 Limitations
 
 1. **Row order is not preserved** by a parallel export (the default for `TABLE=`) — see
    [§18.6](#186-parallel-export-default-for-table). Use `PARALLEL=OFF` / `QUERY=`, or sort after

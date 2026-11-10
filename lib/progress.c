@@ -545,7 +545,13 @@ ProgressInit(const ProgressInfo *info)
 	progress.notice = info->notice;
 	progress.interval_ms = (info->interval_ms > 0) ? info->interval_ms
 		: FL_PROGRESS_DEFAULT_INTERVAL_MS;
-	progress.total_rows = (info->limit_rows != INT64_MAX) ? info->limit_rows : 0;
+	/*
+	 * A finite LIMIT is the exact total.  Without one, an export may still
+	 * carry an estimate (pg_class.reltuples for TABLE=), which is what makes
+	 * the percentage and the ETA computable for the export direction.
+	 */
+	progress.total_rows = (info->limit_rows != INT64_MAX) ? info->limit_rows
+		: info->total_rows_hint;
 
 	progress.infile = fl_safe_string(info->infile);
 	progress.datname = fl_safe_string(info->datname);

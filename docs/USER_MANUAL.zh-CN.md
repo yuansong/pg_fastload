@@ -301,7 +301,22 @@ KEY = 'VALUE WITH SPACES'
 |---|---|---|---|
 | `OUTPUT` / `TABLE` | `schema.table` | 无（必填） | 目标表；只写表名，**不写库名**（库由连接决定） |
 | `TRUNCATE` | `YES` / `NO` | `NO` | 装载前清空目标表 |
+| `SKIP_INDEX` | `YES` / `NO` | `NO` | 装载期间丢弃目标表的二级索引，装载完成后由用户自行重建（见下） |
 | `VERBOSE` | `YES` / `NO` | `NO` | 输出更详细的进度日志 |
+
+**`SKIP_INDEX=ON`。** 装载期间维护索引的代价与装载本身相当（实测单个 btree 约 1.9 s/GiB，
+约占带索引装载时间的一半）。`SKIP_INDEX=ON` 用一个明确的契约把这代价换掉：
+
+* **装载开始前**，目标表的所有*普通*二级索引被删除（发生在装载自己的事务内——装载失败时
+  删除随事务一起回滚，错误路径什么都不丢）。
+* **装载成功后**，装载器打印对应的 `CREATE INDEX` 语句——每条一个 `NOTICE`，`LOGFILE` 里
+  同步留档——**由你**来执行它们。在你重建之前，这些索引不存在，不存在"静默损坏"的中间态。
+* 带**约束**的索引（`PRIMARY KEY` / `UNIQUE` / `EXCLUSION` 约束的支撑索引）会直接报
+  ERROR 拒绝：装载器不会悄悄移除一个约束。请自行先删约束、装载、再重建约束。
+* `SKIP_INDEX` 不能与 `DUP_ERRORS` 组合（重复容忍依赖唯一索引 spool 合并）。
+  `ON_DUPLICATE_KEEP` 可以给，但没有唯一索引时它不生效；丢弃唯一索引时会打 `WARNING`。
+* `WRITER=DIRECT` 与 `WRITER=BUFFERED`、串行与并行均可用；索引删掉后，spool 阶段
+  自然从装载路径上消失。
 
 ### 6.4 CSV 解析（`TYPE=CSV`）
 
@@ -658,8 +673,8 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 | `elapsed_seconds` | 自 `started` 起经过的秒数 |
 | `rows` | leader 已插入的行数，即语句最终会报告的数字 |
 | `bytes_read`、`total_bytes` | reader 已消费字节数 / 输入文件大小（未知时为 `0`：STDIN、管道）。导出时 `bytes_read` 计**已写出**字节，`total_bytes` 恒为 `0` |
-| `total_rows` | `LIMIT`，未限行时为 `0` |
-| `percent` | 有 `LIMIT` 时 `rows ÷ total_rows`，否则 `bytes_read ÷ total_bytes`，都无则 `NULL` |
+| `total_rows` | 有 `LIMIT` 时为 `LIMIT`；否则对 `TABLE=` 导出取源表 `pg_class.reltuples` 估算；未知为 `0` |
+| `percent` | 存在行总量时（`LIMIT` 有限或 `TABLE=` 导出）为 `rows ÷ total_rows`，否则 `bytes_read ÷ total_bytes`，都无则 `NULL` |
 | `bytes_per_second`、`rows_per_second` | 自装载开始至今的平均速率 |
 | `eta_seconds` | 剩余量 ÷ 速率，百分比未知时为 `NULL` |
 | `interval_ms` | 发布间隔 |
@@ -1008,16 +1023,47 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 ### 18.7 进度
 
 导出与装载用同一张视图（[§12.4](#124-加载进度)），记录里 `direction = export`、
-`infile` 是输出文件、`bytes_read` 是已写出的字节数。因为不知道总量，`percent` 与 `eta_seconds`
-为 `NULL`，`rows_per_second`、`bytes_per_second` 照常有：
+`infile` 是输出文件、`bytes_read` 是已写出的字节数：
 
 ```
- pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | bytes_read
-------+---------+----------------+-----------+------------+--------+---------+---------+------------
- 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
+ pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | percent | eta_seconds | bytes_read
+------+---------+----------------+-----------+------------+--------+---------+---------+---------+-------------+------------
+ 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |    50.0 |        3.42 |  536870912
 ```
 
-### 18.8 限制
+* **`TABLE=` 导出有 `percent` 与 `eta_seconds`**：总行数取 `pg_class.reltuples`
+  估算（由 `ANALYZE`／autovacuum 保持新鲜），视图行为与装载一致——百分比爬升到
+  99.9% 封顶、ETA 倒计时，收尾 `NOTICE` 一律 `100.0% | done`（无论估算与实际行数
+  差多少）。估算只与最近一次 `ANALYZE` 一样准——大批装载后未 analyze 时 `reltuples`
+  可能偏差很大，百分比随之偏差。
+* `QUERY=` 导出没有行数估算：显示 `rows`、两个速率与 `elapsed_seconds`，
+  `percent`／`eta_seconds` 为 `NULL`。
+* 刷新节奏由 `PROGRESS_INTERVAL` 控制（默认 1000 ms，最小 100 ms）；并行导出由
+  leader 按同一节奏从 writer 计数器重发布。
+
+### 18.8 快照一致性（并发写入、导出 → 回灌闭环）
+
+导出的每个字节都来自**同一个 MVCC 快照**；一次长导出不是"每次读到不同表内容"的
+一系列读取。
+
+* **创建**：扫描使用调用方的活动快照——`READ COMMITTED` 下是 `pg_fastload_export()`
+  启动时的语句快照，`REPEATABLE READ`／`SERIALIZABLE` 下是事务快照。该时点之后提交的
+  行对导出不可见，无论哪个进程读到哪个块。
+* **传递**：并行导出时 leader 在拉起工作进程前把这份快照原样序列化（`SerializeSnapshot()`）
+  进 DSM 段；每个进程恢复它（`RestoreSnapshot()` + `PushActiveSnapshot`）而不是自取快照，
+  N 个进程加 writer 看到的是同一数据库状态——导出中途的提交不会让块边界上的行被跳过或重复。
+* **生命周期**：快照存活于被 pin 住的 DSM 段中直至导出结束；进程结束时弹出，导出结束
+  时段被销毁。长导出会让快照一直存活，从而推迟 `VACUUM` 越过 `oldest xmin`
+  （见 [§18.9](#189-限制)）。
+* **可审计**：导出日志记录快照指纹（`snapshot: xmin=… xmax=… cid=…`），"这份文件
+  是哪个快照产的"只凭 `LOGFILE` 即可回答。
+* **装载端无需快照合并**：装载读的是*文件*（写完即不可变），并对目标表持
+  `AccessExclusiveLock`，装载期间没有其他会话能写这张表；正确性由事务保证，
+  不依赖快照。导出 → 回灌闭环可用顺序无关摘要
+  （`count(*) || sum(hash_record_extended(t,0))`）在两端核对字节级一致性——
+  流程见 [VERIFICATION §5](VERIFICATION.zh-CN.md)。
+
+### 18.9 限制
 
 1. **行序不保证**：并行导出（`TABLE=` 的默认行为）按到达顺序落盘，见 [§18.6](#186-并行导出table-的默认行为)；
    需要顺序用 `PARALLEL=OFF`／`QUERY=`，或回灌后排序。

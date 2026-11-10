@@ -379,7 +379,24 @@ PostgreSQL）复现出「256 KiB 块大小不变，`fsync()` 在约 0.1 s 与恰
 
 ---
 
-## 13. 结论
+## 13. `SKIP_INDEX` 与导出进度验证（2026-11-10）
+
+PG 18.6 上 `verify_skipindex_export.py` **20/20 PASS**：
+
+- **S1（摘除 + 重建闭环）**：带两个普通 btree 索引的表以 `SKIP_INDEX=ON` 装载——NOTICE
+  报告摘除 2 个索引、原样打印两条 `CREATE INDEX`，装载期间 `pg_index` 确认 0 个索引，
+  行数 500,000 与顺序无关摘要均与源表一致；执行打印出的 DDL 后恰好恢复 2 个索引。
+- **S2（守卫）**：`SKIP_INDEX=ON` + 主键表 + `DUP_ERRORS` → `ERROR ... cannot be
+  combined with DUP_ERRORS`，装载被拒。
+- **S3（无索引 no-op）**：无索引表带 `SKIP_INDEX=ON` 正常装载、无摘除 NOTICE，摘要一致。
+- **P1（导出 percent/ETA）**：`TABLE=` CSV 导出在 `PROGRESS_NOTICE=ON` 下流出
+  `progress: NN.N% of N rows`（含 ETA），收尾 `100.0% | done`，输出字节数与源一致。
+- **P2（QUERY= 导出）**：无百分比（只有行数/速率行），LIMIT 口径的百分比照常工作。
+
+改动后回归：`fastload_verify.py` **90/90**、`fastload_verify_fixed.py` **44/44**；
+构建 rc=0、新增代码零警告。
+
+## 14. 结论
 
 当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8、导出 39/39、并行导出五个
 大版本各 33/33）、上游等价性（与 pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、加载进度
