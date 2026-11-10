@@ -23,6 +23,9 @@ inside the caller's transaction.
 | 4 | Never a silent semantic change: 13 conditions fall back to serial with one `INFO` line, and a bad row fails the load instead of keeping a timing-dependent subset | 13 downgrade cases, all-or-nothing |
 | 5 | Drop-in from pg_bulkload: same control keywords, `TYPE` values, log format and `WRITER` modes | rename two identifiers |
 | 6 | Both directions in one engine: `pgfastload.pg_fastload_export()` writes CSV / BINARY / FIXED with the same Writer and `COL` / `OUT_COL` layout | **9.60×** parallel export vs serial, **9.33× vs `COPY ... TO`**; CSV byte-identical to `COPY ... TO` |
+| 7 | `SKIP_INDEX=ON` drops the target's secondary indexes inside the load transaction and prints the verbatim `CREATE INDEX` rebuild DDLs — the manual drop-and-recreate workflow as one keyword, rolled back on load failure | ≈1.9 s/GiB back on an indexed table (~half of a DIRECT load) |
+| 8 | Every load *and* export is trackable: one cluster-wide progress view with percent/ETA (exports estimate the total from `reltuples`), and export logs record the MVCC snapshot fingerprint | `pgfastload.pg_fastload_progress`, `PROGRESS_NOTICE=ON` |
+| 9 | Benchmarked against *every* upstream writer mode, not just `DIRECT` — upstream's fastest mode is `WRITER=PARALLEL` | **1.58×** the best upstream mode, **4.4–4.6×** its slowest |
 
 ## Feature summary
 
@@ -30,7 +33,8 @@ inside the caller's transaction.
 serial path; `PARALLEL=ON` with `PARALLEL_WORKERS=1..64` (default: online CPUs − 1);
 `WRITER=DIRECT / BUFFERED / PARALLEL`; `SKIP` / `LIMIT`, `DUPLICATE_*`, `FILTER`,
 `FORCE_NOT_NULL`, `NULLIF`, `ENCODING`, `TRUNCATE=YES`, `MULTI_PROCESS`; per-row tolerance with
-`PARSE_ERRORS` + `PARSE_BADFILE` on the serial path.
+`PARSE_ERRORS` + `PARSE_BADFILE` on the serial path; `SKIP_INDEX=ON` for
+drop-and-rebuild index handling.
 
 **Export** — `pgfastload.pg_fastload_export()` with `TABLE=` or `QUERY=`, `TYPE=CSV / BINARY /
 FIXED`, `OUT_COL`, `HEADER`, `LIMIT`, `DELIMITER` / `QUOTE` / `ESCAPE` / `NULL`; parallel by
@@ -38,9 +42,11 @@ default for `TABLE=`, always serial for `QUERY=`.
 
 **Observability** — every load publishes progress, readable from any session through
 `pgfastload.pg_fastload_progress` (`percent`, byte/row rates, `eta_seconds`), or streamed with
-`PROGRESS_NOTICE=ON`; `USE_PROFILE=1` builds print the stage groups `GLOBAL / READER / CSV /
-WRITER / MERGE / PARALLEL / WORKER`; every log carries per-worker row counts and
-`CPU x/y sec elapsed z sec`.
+`PROGRESS_NOTICE=ON`; exports use the same view — a `TABLE=` export shows `percent`/`eta_seconds`
+from the `reltuples` estimate, and the export log records the snapshot fingerprint
+(`xmin/xmax/cid`) for auditability; `USE_PROFILE=1` builds print the stage groups
+`GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER`; every log carries per-worker row
+counts and `CPU x/y sec elapsed z sec`.
 
 **Operations** — `pg_fastload x.ctl` CLI (`-o KEY=VALUE` overrides, `-r` recovery) and
 `pgfastload.pg_fastload(ARRAY[...])`; one `master` branch for PostgreSQL 15 / 16 / 17 / 18 / 19,
