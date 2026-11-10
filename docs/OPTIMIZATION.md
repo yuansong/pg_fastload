@@ -42,6 +42,8 @@ Cumulative: **15 adopted optimizations + 1 round of code cleanup; 4 rejected** (
 | 12 | Round 7 | Code cleanup | Dead fields, duplicated logic (single definition of FastloadDefaultWorkers()), undocumented aliases, shared pointers inside lock critical sections, MULTI_PROCESS combination guards, artifact cleanup | No behavioral change; 90/90 + 44/44 + 8/8 all green |
 | 13 | Round 8 | F-1 bulk CSV field split | Quote-free records no longer walk the byte-by-byte state machine: one `memchr('\n')`, one quote/CR pre-scan, one record copy into the scratch field buffer, then each delimiter is cut in place. Same splitter in the parallel workers (`fl_parse_fields`) | `<CSV> SPLIT` **1.92 → 0.90 s**; fl_off 7.99 → **5.81 s**, auto 1.76 → **1.37 s** |
 | 14 | Round 8 | F-2 encoding-loop hoist | `CheckerConversion()` was invoked once per field even with no `ENCODING` option; the 118 M-call loop now sits behind `if (checker->check_encoding)` | Included in the 3.82 s `VALUE` figure |
+| 15 | Round 9 | `SKIP_INDEX=ON` | Indexes dropped before `WriterInit` (transactional — failed loads roll the drops back), verbatim rebuild DDLs printed to `LOGFILE`+`NOTICE`; conflict-guarded against `ON_DUPLICATE`/`DUP_ERRORS` | ≈1.9 s/GiB saved on an indexed table (~50% of the DIRECT load time) |
+| 16 | Round 9 | Export progress percent/ETA | `total_rows_hint` from `pg_class.reltuples` (`TABLE=` only); existing percent/ETA machinery lights up with zero new parameters; view clamps at 99.9% | Observability (no measurable cost) |
 
 ---
 

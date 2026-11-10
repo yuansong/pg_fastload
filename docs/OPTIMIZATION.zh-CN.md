@@ -43,6 +43,8 @@ PostgreSQL 18.6 release，`WRITER=DIRECT`，无索引，热缓存 3 轮中位。
 | 12 | 第七轮 | 代码整理 | 死字段、重复逻辑（`FastloadDefaultWorkers()` 单一定义）、未文档化别名、锁临界区内共享指针、`MULTI_PROCESS` 组合防护、生成物清理 | 无行为变化；90/90 + 44/44 + 8/8 全绿 |
 | 13 | 第八轮 | F-1 CSV 批量切分 | 无引号记录不再走逐字节状态机：一次 `memchr('\n')`、一次引号/回车预扫描、一次整条复制进字段缓冲，随后每个分隔符就地切断；同一套切分器也用于并行 worker（`fl_parse_fields`） | `<CSV> SPLIT` **1.92 → 0.90 s**；fl_off 7.99 → **5.81 s**、auto 1.76 → **1.37 s** |
 | 14 | 第八轮 | F-2 编码循环外提 | 未给 `ENCODING` 时 `CheckerConversion()` 仍被逐字段调用；1.18 亿次调用整段移到 `if (checker->check_encoding)` 之下 | 计入 `VALUE` 的 3.82 s |
+| 15 | 第九轮 | `SKIP_INDEX=ON` | 索引在 `WriterInit` 之前摘除（事务内——装载失败一并回滚），重建 DDL 原样打印到 `LOGFILE`+`NOTICE`；与 `ON_DUPLICATE`/`DUP_ERRORS` 互斥守卫 | 带索引表省 ≈1.9 s/GiB（约占 DIRECT 装载时间一半） |
+| 16 | 第九轮 | 导出进度 percent/ETA | 从 `pg_class.reltuples` 取 `total_rows_hint`（仅 `TABLE=`）；复用现有 percent/ETA 机制、零新增参数；视图百分比 99.9% 封顶 | 可观测性（开销不可测） |
 
 ---
 
