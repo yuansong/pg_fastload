@@ -434,10 +434,11 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 | 用户手册（安装 / 关键字全表 / 用法 / FAQ） | [docs/USER_MANUAL.zh-CN.md](docs/USER_MANUAL.zh-CN.md) | [docs/USER_MANUAL.md](docs/USER_MANUAL.md) |
 | 架构（组件职责、数据流、IPC 协议、降级设计） | [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | 多版本适配（PG 15–19 差异与验收结果） | [docs/PORTING.zh-CN.md](docs/PORTING.zh-CN.md) | [docs/PORTING.md](docs/PORTING.md) |
-| 相对 pg_bulkload 的修改点 | [docs/CHANGES.md](docs/CHANGES.md) | — |
-| 性能基准 | [docs/BENCHMARK.md](docs/BENCHMARK.md) | — |
-| 验证报告（用例、正确性、内存、合规） | [docs/VERIFICATION.md](docs/VERIFICATION.md) | — |
-| 优化记录与未采纳方案 | [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) | — |
+| 相对 pg_bulkload 的修改点 | [docs/CHANGES.zh-CN.md](docs/CHANGES.zh-CN.md) | [docs/CHANGES.md](docs/CHANGES.md) |
+| 性能基准 | [docs/BENCHMARK.zh-CN.md](docs/BENCHMARK.zh-CN.md) | [docs/BENCHMARK.md](docs/BENCHMARK.md) |
+| 验证报告（用例、正确性、内存、合规） | [docs/VERIFICATION.zh-CN.md](docs/VERIFICATION.zh-CN.md) | [docs/VERIFICATION.md](docs/VERIFICATION.md) |
+| 优化记录与未采纳方案 | [docs/OPTIMIZATION.zh-CN.md](docs/OPTIMIZATION.zh-CN.md) | [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) |
+| 发布说明（1.0.0） | [RELEASE_NOTES_v1.0.0.zh-CN.md](RELEASE_NOTES_v1.0.0.zh-CN.md) | [RELEASE_NOTES_v1.0.0.md](RELEASE_NOTES_v1.0.0.md) |
 
 ---
 

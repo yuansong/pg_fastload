@@ -1,0 +1,50 @@
+name: RPM packages (manual)
+
+# The upstream pg_bulkload RPM pipeline, kept for people who want packages.
+# It is deliberately manual: a release must not depend on a docker matrix, and
+# PostgreSQL 14 is not supported by this branch (see include/pg_fastload.h).
+
+on:
+  workflow_dispatch:
+    inputs:
+      pg_version:
+        description: PostgreSQL major version
+        required: true
+        default: '18'
+        type: choice
+        options: ['15', '16', '17', '18']
+      rhel_version:
+        description: RHEL base image for the build container
+        required: true
+        default: '9'
+        type: choice
+        options: ['8', '9', '10']
+
+permissions:
+  contents: read
+
+jobs:
+  build_rpms:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the RPMs in the upstream container
+        env:
+          PG_VERSION: ${{ inputs.pg_version }}
+          RHEL_VERSION: ${{ inputs.rhel_version }}
+        run: |
+          export PG_FASTLOAD_VERSION=$(sed -n 's/.*PG_FASTLOAD_VERSION "\([0-9][0-9.]*\)".*/\1/p' include/common.h | head -n1)
+          docker build .github/workflows/ -t pg_fastload \
+            --build-arg RHEL_VERSION="$RHEL_VERSION" \
+            --build-arg PG_VERSION="$PG_VERSION" \
+            --build-arg PG_FASTLOAD_VERSION="$PG_FASTLOAD_VERSION" \
+            --build-arg REPO_URL=${{ github.server_url }}/${{ github.repository }}.git
+          container_id=$(docker create pg_fastload)
+          docker cp "$container_id":/var/lib/pgsql/rpmbuild/RPMS/x86_64 ./RPMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpms-pg${{ inputs.pg_version }}-rhel${{ inputs.rhel_version }}
+          path: RPMS/*.rpm
+          if-no-files-found: warn
