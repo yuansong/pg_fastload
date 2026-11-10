@@ -352,6 +352,15 @@ CSV 语义细节见 [§9.1](#91-csv)。
 | `PARALLEL` | `ON` / `OFF` | `OFF` | 打开多进程并行加载 |
 | `PARALLEL_WORKERS` | `1`..`64` | 在线 CPU 核数 − 1（≥1） | 解析 worker 数；`≤1` 直接串行落回 |
 
+### 6.9 进度显示（pg_fastload 新增）
+
+| 关键字 | 取值 | 默认 | 说明 |
+|---|---|---|---|
+| `PROGRESS` | `ON` / `OFF` | `OFF` | 装载过程中按间隔输出一行进度 |
+| `PROGRESS_INTERVAL` | `100`..`3600000`（毫秒） | `1000` | 两行之间的最小间隔；**指定该参数等价于 `PROGRESS=ON`** |
+
+输出格式与开销见 [§12.4](#124-加载进度)。
+
 ---
 
 ## 7. SQL 接口
@@ -588,6 +597,47 @@ SELECT pid, backend_type, state FROM pg_stat_activity WHERE backend_type LIKE '%
 ```
 
 并行装载期间可见 1 个 reader + N 个 worker（pg 18 中动态 bgworker 会出现在 `pg_stat_activity`）。
+
+### 12.4 加载进度
+
+`pg_fastload()` 是一次 SQL 调用，不加处理的话直到返回都不打印任何东西 —— 100 GB 数据跑半小时
+会让人心里没底。`PROGRESS=ON` 会按固定间隔打印快照：
+
+```sql
+SELECT * FROM pgfastload.pg_fastload(ARRAY[
+  'INPUT=/data/lineitem.csv',
+  'OUTPUT=public.lineitem',
+  'PARALLEL=ON',
+  'PROGRESS=ON',
+  'PROGRESS_INTERVAL=1000'   -- 毫秒，默认 1000
+]);
+```
+
+```
+NOTICE:  pg_fastload progress: start, input 1024.0 MiB, interval 1000 ms
+NOTICE:  pg_fastload progress: 12.6% (129.0 MiB / 1024.0 MiB) | rows 927,744 | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
+NOTICE:  pg_fastload progress: 50.0% (512.0 MiB / 1024.0 MiB) | rows 3,687,521 | 136.4 MiB/s | 982.0k rows/s | elapsed 00:00:03 | ETA 00:00:03
+NOTICE:  pg_fastload progress: 100.0% (1024.0 MiB / 1024.0 MiB) | rows 7,375,042 | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+```
+
+| 字段 | 含义 |
+|---|---|
+| 百分比 | 已读字节 ÷ 输入文件大小；输入大小未知时退化为 *已装行数 ÷ `LIMIT`*，两者都没有（STDIN／管道）时整个百分比省略 |
+| `rows` | leader 已插入的行数，即语句最终会报告的数字 |
+| `read` | reader 已消费的字节（串行路径来自解析器，并行路径来自唯一的 reader 进程） |
+| `…/s` | 语句开始至今的平均字节速率与行速率 |
+| `ETA` | 剩余字节 ÷ 平均字节速率（只在有百分比时给出） |
+| `\| done` | 收尾行，恰好输出一次；即使装载短于一个间隔也会输出 |
+
+注意事项：
+
+- 进度是 `NOTICE`，受 `client_min_messages` 控制；把它设成 `warning` 及以上就看不到。同样的文本
+  会追加到 `LOGFILE`，后台装载可以事后查看。
+- 百分比基于字节，单调不减。收尾行之前最多停在 `99.9%`：reader 可能已读完而 leader 还在插行，
+  中途出现 `100.0%` 只会让人误以为卡住。
+- 开销是每插入一行一次整数比较（每 512 行才取一次时钟），1 GiB 基线上低于 0.1%；额外的 I/O
+  只有收尾行与 `LOGFILE` 副本。
+- 因被拒记录而中止的装载（见 [§11](#11-错误处理与-badfile)）不会打印收尾行，因为它并没有"完成"。
 
 ---
 

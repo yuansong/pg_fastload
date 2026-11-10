@@ -128,6 +128,8 @@ typedef struct FastloadShared
 	bool		reader_failed;
 	char		reader_error[256];
 	double		reader_scan;
+	int64		bytes_read;			/* input bytes the reader has consumed;
+								 * polled by the leader for PROGRESS */
 	int			worker_state[FASTLOAD_MAX_WORKERS];
 	int64		worker_rows[FASTLOAD_MAX_WORKERS];
 	char		worker_error[FASTLOAD_MAX_WORKERS][256];

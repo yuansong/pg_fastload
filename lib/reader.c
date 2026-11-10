@@ -35,6 +35,7 @@
 #include "pg_profile.h"
 #include "pg_strutil.h"
 #include "pgut/pgut-be.h"
+#include "progress.h"
 #include "reader.h"
 
 #include "fastload_parallel.h"
@@ -225,6 +226,29 @@ ReaderParam(Reader *rd, const char *keyword, char *target)
 					 errmsg("PARALLEL_WORKERS must be between 1 and 64")));
 		rd->parallel_workers = (int) n;
 	}
+	else if (CompareKeyword(keyword, "PROGRESS"))
+	{
+		rd->progress = ParseBoolean(target);
+	}
+	else if (CompareKeyword(keyword, "PROGRESS_INTERVAL"))
+	{
+		int64	n = ParseInt64(target, 0);
+
+		if (n < FL_PROGRESS_MIN_INTERVAL_MS || n > FL_PROGRESS_MAX_INTERVAL_MS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("PROGRESS_INTERVAL must be between %d and %d "
+							"milliseconds",
+							FL_PROGRESS_MIN_INTERVAL_MS,
+							FL_PROGRESS_MAX_INTERVAL_MS)));
+		rd->progress_interval = (int) n;
+
+		/*
+		 * Giving a cadence is a request to see the report; requiring a
+		 * second keyword for the obvious meaning would only surprise people.
+		 */
+		rd->progress = true;
+	}
 	else if (rd->parser == NULL ||
 			!ParserParam(rd->parser, keyword, target))
 		return false;
@@ -413,6 +437,11 @@ ReaderDumpParams(Reader *self)
 						 pg_encoding_to_char(self->checker.encoding));
 	appendStringInfo(&buf, "CHECK_CONSTRAINTS = %s\n",
 		self->checker.check_constraints ? "YES" : "NO");
+	appendStringInfo(&buf, "PROGRESS = %s\n", self->progress ? "YES" : "NO");
+	if (self->progress)
+		appendStringInfo(&buf, "PROGRESS_INTERVAL = %d\n",
+			self->progress_interval > 0 ? self->progress_interval
+										: FL_PROGRESS_DEFAULT_INTERVAL_MS);
 
 	LoggerLog(INFO, buf.data, 0);
 	pfree(buf.data);

@@ -309,5 +309,85 @@ fl_w8 1.76 s、fl_w15 1.74 s、fl_auto 1.76 s，与上一轮差异在 ±5% 运�
 
 ---
 
+## 17. 与上游 pg_bulkload 的差分审计（2026-11-10）
+
+方法：把上游 `pg_bulkload` 3.1.23 编译到**同一台服务器、同一个集群**当 oracle，用三套差分脚本把
+同一份输入分别喂给 `pgbulkload.pg_bulkload()` 与 `pgfastload.pg_fastload()` 的三种配置
+（`PARALLEL=OFF` / `PARALLEL=ON` w=2 / w=4），逐例比对 SRF 结果行
+（`skip`/`count`/`parse_errors`/重复计数）、内容摘要
+`count(*) || coalesce(sum(hash_record_extended(t,0)),0)` 与消息严重级。共 75 例：引号、转义、
+CRLF、裸 CR、空行、缺列/多列、未闭合引号、类型转换失败、`SKIP`+`LIMIT` 窗口、唯一索引与主键冲突
+（含 `ON_DUPLICATE_KEEP`）、`WRITER=BUFFERED/PARALLEL`、`MULTI_PROCESS`、`FORCE_NOT_NULL`、
+`NULL`/`ENCODING`/自定义 `DELIMITER`+`QUOTE`+`ESCAPE`、`PARSE_ERRORS` 0/2、20 万行与 1 MiB
+读块边界输入、定长（含 `SKIP`/`LIMIT`/尾部残记录）。
+
+审计前串行路径 75 例全部正确；并行路径查出并修掉 4 个真缺陷。
+
+| # | 缺陷 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 被拒记录直接打死 worker（连带整条语句），`count`/`parse_errors` 从不返回 | 并行 reader 自己抛 `unterminated CSV quoted field`，worker 的解析/转换错误也无人吸收（串行路径由 `ReaderNext()` 吸收） | worker 内 `PG_TRY`/`PG_CATCH`（`fl_emit_record_safe`），首个错误连同记录号、列号发布到控制块（`fl_record_parse_error`），记录追加到 `PARSE_BADFILE`，由 leader 上报；截断的末条记录改投给 worker 而不在 reader 报错 |
+| 2 | `SKIP` 语义不一致：`SKIP=1` 并行按 1 条**记录**，上游按 1 **行** | `SKIP` 被 `fl_route_record()` 当成记录偏移；上游前导循环数物理行且不识别引号 | 新增 `fl_skip_lines()` 在记录扫描前走原始字节（`LF`/`CRLF`/裸 `CR`），`fl_route_record()` 只保留 `LIMIT` |
+| 3 | 首个坏记录之后仍继续装载：oracle 10 万行，w=2/4/8 分别装成 **15.6/17.6/19.4 万**行且每次不同 | 坏记录之后的行已在其它 worker 队列里，"停止读取、保留已读"在并行下无法复现 | 并行契约改为**原子**：先打同样的 WARNING，再 `ERROR` 整体回滚；永不多装、与 worker 时序无关（见 USER_MANUAL §11） |
+| 4 | 被跳过的超长行（> 1 MiB）导致堆溢出 | `fl_skip_lines()` 往固定 `FL_READ_CHUNK + 2` 缓冲累加（记录扫描每轮会把余量消费掉，被跳过的行不会）；SKIP 后第一轮扫描也有同样假设 | 两处改为 `repalloc` 按需增长 |
+
+附带：8 字节帧头第二字改携带记录号（`hdr8[1]`），leader 侧消息能报出输入记录号，与串行一致。
+
+审计可复现：`util/fl_diff_test.py` 是自包含版本（44 例 × 4 配置，不依赖 SSH/VM），只需一个装了
+两个扩展的集群。
+
+修后结果：**0 mismatch** —— 75 例 × 3 配置 = 225 次比对，其中 30 次是已文档化的并行原子中止
+（`PARALLEL=OFF` 与 oracle 每一例都完全一致）。全套在 **15.19 / 16.15 / 17.11 / 18.6** 上重跑结果
+相同（合计 900 次比对）；四个版本的单主版本验收（`util/fl_ver_test.sh`）与
+`fastload_verify.py` 90/90、`fastload_verify_fixed.py` 44/44 同时通过。PG19 无 oracle：上游
+3.1.23 在 19 上编译失败（正是我们 `bin/pgut/pgut-list.h` 修掉的 `Datum` 位置问题），改由功能验收
+与串并行自洽覆盖。
+
+---
+
+## 18. 装载进度显示（2026-11-10）
+
+`pg_fastload()` 是一次 SQL 调用，大文件跑几分钟也看不到任何输出。新增两个关键字解决这个问题：
+
+| 关键字 | 取值 | 默认 | 说明 |
+|---|---|---|---|
+| `PROGRESS` | `ON` / `OFF` | `OFF` | 按固定间隔输出一行进度 |
+| `PROGRESS_INTERVAL` | `100`..`3600000` 毫秒 | `1000` | 两行之间的最小间隔；**指定即等价于 `PROGRESS=ON`** |
+
+```
+NOTICE:  pg_fastload progress: start, input 1.00 GiB, interval 200 ms
+NOTICE:  pg_fastload progress: 12.6% | rows 927,744 | 129.0 MiB / 1.00 GiB | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
+NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 149.0 MiB/s | 1.07M rows/s | elapsed 00:00:06 | done
+```
+
+| 文件 | 改动 |
+|---|---|
+| `include/progress.h`、`lib/progress.c` | 新模块：单位格式化（字节/速率/`hh:mm:ss`/千分位）、间隔节流、`NOTICE` + `LOGFILE` 双写 |
+| `include/reader.h` | `Parser.bytes_read`（百分比来源）；`Reader.progress` / `progress_interval` |
+| `lib/reader.c` | 新增 `PROGRESS` / `PROGRESS_INTERVAL` 参数解析与范围校验，并写入装载日志 |
+| `lib/parser_csv.c`、`lib/parser_binary.c` | 每次 `SourceRead()` 累加 `bytes_read`（含被 SKIP 掉的记录，百分比因此覆盖 SKIP 段） |
+| `lib/pg_fastload.c` | 日志就绪后 `ProgressInit()`；串行循环内 `ProgressUpdate()` / `ProgressFinish()` |
+| `include/fastload_parallel.h` | `FastloadShared.bytes_read`，由 reader 进程发布 |
+| `lib/fastload_worker.c` | CSV 与定长两条 reader 路径每次 `read()` 后 `fl_publish_bytes()`（每 1 MiB 一次 spinlock） |
+| `lib/fastload_parallel.c` | leader 每插入 1024 行采样一次 `bytes_read` 并 `ProgressUpdate()`；即将中止的装载不打印收尾行 |
+
+设计要点：
+
+- **百分比来源**：给了 `LIMIT` 就按 `行数 / LIMIT`（请求的行到齐即算完成，即使 reader 故意提前停）；
+  否则按 `已读字节 / 文件大小`；两者都没有（STDIN、管道）则不显示百分比。
+- **单调不减、不说谎**：周期行最高 `99.9%`，`100.0%` 只属于收尾行——reader 可能已到 EOF 而 leader
+  还在插最后几行。
+- **开销**：每插入一行一次整数比较，每 512 行才取一次时钟。1 GiB 串行基线实测：不开 6 922 ms、
+  开 6 917 ms（三次交错运行中位数，−0.07%，即噪声范围内）。
+- **中止不打收尾行**：因解析错误契约（第 17 节）停下的装载不算"完成"。
+
+验证（`_t_progress.py`，PG 18.6，15 个用例）：默认与 `PROGRESS=OFF` 零输出；只给
+`PROGRESS_INTERVAL` 也能开启；串行 1 GiB 在 200 ms 间隔下输出 36 行；`PARALLEL=ON` w=4 输出 10 行、
+auto 输出 3 行；`LIMIT=1000000` 百分比切换为 `of 1,000,000 rows`；定长 100 MiB 输出 3 行；
+`PROGRESS_INTERVAL=50` 报错 `PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds`；
+每例收尾行的行数与函数返回值完全一致；百分比单调且不超过 100。CSV 90/90、定长 44/44 与多版本
+验收均不受影响。
+
+---
+
 *未采纳方案汇总见 [OPTIMIZATION.zh-CN.md](OPTIMIZATION.zh-CN.md#八未采纳方案汇总)；性能数据见
 [BENCHMARK.md](BENCHMARK.md)；验证结论见 [VERIFICATION.md](VERIFICATION.md)。*

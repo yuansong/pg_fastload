@@ -247,8 +247,32 @@ Regression after the fixes: `fastload_verify.py` **90/90 PASS**, `fastload_verif
 
 ---
 
-## 11. Conclusion
+## 11. Progress Reporting Verification (2026-11-10)
 
-The current version meets the delivery criteria across seven dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
+`PROGRESS=ON` must be observably correct (right numbers, right cadence, right edge cases) and free of
+measurable cost. Harness: `_t_progress.py` on PG 18.6, 15 cases over the 1 GiB TPC-H `lineitem.csv`
+(7,375,042 rows) and a generated 100 MiB fixed-length file (1,638,400 rows).
+
+| Check | Result |
+|---|---|
+| `PROGRESS` omitted / `PROGRESS=OFF` | 0 progress lines (no regression for existing users) |
+| `PROGRESS_INTERVAL` alone | enables reporting (36 lines at 200 ms on the serial 1 GiB load) |
+| Serial 1 GiB, interval 200 ms | 36 reports over 6.9 s; closing line `100.0%`, rows `7,375,042` = SRF `count` |
+| `PARALLEL=ON` w=4, interval 200 ms | 10 reports over 1.7 s; same closing row count |
+| `PARALLEL=ON` auto (15), default 1000 ms | 3 reports (start / one update / closing) |
+| `LIMIT=1000000` | percentage becomes row-based (`100.0% of 1,000,000 rows`), reader stopped at 139 MiB of 1 GiB |
+| Fixed-length 100 MiB, interval 100 ms | 3 reports; closing rows `1,638,400` = SRF `count` |
+| `PROGRESS_INTERVAL=50` | rejected: `PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds` |
+| Percentage monotonicity / bound | strictly non-decreasing, never above 100.0 |
+| Cost (serial 1 GiB, median of 3 interleaved runs) | 6 922 ms off vs 6 917 ms on (**−0.07%**, i.e. noise) |
+
+No case produced a mismatched row count, a missing closing line, or an extra line when the option is
+off. The CSV 90/90 and fixed-length 44/44 suites are unaffected (the option defaults to off).
+
+---
+
+## 12. Conclusion
+
+The current version meets the delivery criteria across eight dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (15/15 cases, exact final numbers, no measurable cost), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
 
 The residual risks can all be attributed to environmental limitations or explicit design trade-offs, as documented in §8 and [OPTIMIZATION.md](OPTIMIZATION.md), along with corresponding usage recommendations (e.g., worker-count selection for cold-cache scenarios, using `PARALLEL=OFF` when fault tolerance is needed).

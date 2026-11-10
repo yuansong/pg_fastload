@@ -375,4 +375,53 @@ covered by functional acceptance and serial-vs-parallel self-consistency only.
 
 ---
 
+## 18. Load Progress Reporting (2026-11-10)
+
+`pg_fastload()` is a single SQL statement, so a multi-minute load over a large file produced no output
+at all until it returned. Two new keywords fix that:
+
+| Keyword | Values | Default | Notes |
+|---|---|---|---|
+| `PROGRESS` | `ON` / `OFF` | `OFF` | emit a one-line report at a fixed cadence |
+| `PROGRESS_INTERVAL` | `100`..`3600000` ms | `1000` | minimum gap between two reports; **implies `PROGRESS=ON`** |
+
+```
+NOTICE:  pg_fastload progress: start, input 1.00 GiB, interval 200 ms
+NOTICE:  pg_fastload progress: 12.6% | rows 927,744 | 129.0 MiB / 1.00 GiB | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
+NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 149.0 MiB/s | 1.07M rows/s | elapsed 00:00:06 | done
+```
+
+| File | Change |
+|---|---|---|
+| `include/progress.h`, `lib/progress.c` | new module: formatting (bytes / rates / `hh:mm:ss` / thousands separators), cadence throttling, `NOTICE` + `LOGFILE` emission |
+| `include/reader.h` | `Parser.bytes_read` (drives the percentage); `Reader.progress` / `progress_interval` |
+| `lib/reader.c` | `PROGRESS` / `PROGRESS_INTERVAL` keywords with range validation; both dumped to the log |
+| `lib/parser_csv.c`, `lib/parser_binary.c` | accumulate `bytes_read` at every `SourceRead()` (skipped records included, so the percentage covers `SKIP`) |
+| `lib/pg_fastload.c` | `ProgressInit()` after the logger exists; `ProgressUpdate()` / `ProgressFinish()` in the serial loop |
+| `include/fastload_parallel.h` | `FastloadShared.bytes_read`, published by the reader |
+| `lib/fastload_worker.c` | `fl_publish_bytes()` at every read() in both the CSV and the fixed-length reader (spinlock once per 1 MiB) |
+| `lib/fastload_parallel.c` | leader samples `bytes_read` every 1024 inserted rows and calls `ProgressUpdate()`; closing line skipped when the load is about to abort |
+
+Design notes:
+
+- **Percentage source.** `LIMIT` given → `rows / LIMIT` (the job is complete when the requested rows are
+  in, even though the reader deliberately stops early). Otherwise `bytes_read / file size`. Neither
+  known (STDIN, pipe) → no percentage at all.
+- **Never regresses, never lies.** The periodic lines cap at `99.9%`; `100.0%` belongs to the closing
+  line only, because the reader can be at EOF while the leader still has rows to insert.
+- **Cost.** One integer comparison per inserted row — the clock is sampled once every 512 rows. Measured
+  on the 1 GiB serial baseline: 6 922 ms without, 6 917 ms with (median of three interleaved runs,
+  −0.07%, i.e. inside the noise).
+- **No closing line on abort.** A load stopped by the parse-error contract (section 17) is not "done".
+
+Verification (`_t_progress.py`, PG 18.6, 15 cases): option off by default and with `PROGRESS=OFF` → zero
+lines; `PROGRESS_INTERVAL` alone enables reporting; serial 1 GiB → 36 reports at 200 ms; `PARALLEL=ON`
+w=4 → 10 reports, auto → 3; `LIMIT=1000000` → percentage switches to `of 1,000,000 rows`; fixed-length
+100 MiB → 3 reports; `PROGRESS_INTERVAL=50` → rejected with
+`PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds`; every closing line reports `100.0%`
+and the exact row count returned by the function; percentages are monotonic and never exceed 100.
+The CSV 90/90 and fixed-length 44/44 suites and the multi-version acceptance are unaffected.
+
+---
+
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

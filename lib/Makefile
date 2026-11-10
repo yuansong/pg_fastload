@@ -15,6 +15,7 @@ SRCS = \
 	pg_btree.c \
 	pg_fastload.c \
 	pg_strutil.c \
+	progress.c \
 	reader.c \
 	source.c \
 	writer.c \

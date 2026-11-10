@@ -213,12 +213,74 @@ bgworker 真启动（日志有 `PARALLEL=ON, TYPE=CSV, workers=N` 且无 `PARALL
 
 ---
 
-## 10. 结论
+## 10. 与 pg_bulkload 的差分验证（2026-11-10）
 
-当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8）、构建（release + debug
-双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、定长 1.82×）、内存生命周期（全 palloc、
-无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）与版权合规（保留原版权 + 明确署名
-与非背书）六个维度达到交付标准。
+目标：证明 `pg_fastload` 与它 fork 的上游**行为等价**，而不只是自洽（串行 vs 并行）。
+
+| 项 | 值 |
+|---|---|
+| oracle | 上游 `pg_bulkload` 3.1.23（HEAD `798e0f2`），编译到**同一台服务器、同一集群、同一张表** |
+| 比对内容 | SRF 结果行（`skip`/`count`/`parse_errors`/`duplicate_new`/`duplicate_old`）+ 内容摘要 `count(*)\|\|coalesce(sum(hash_record_extended(t,0)),0)` + 消息严重级 |
+| 配置 | `pgbulkload.pg_bulkload`、我们 `PARALLEL=OFF`、`PARALLEL=ON PARALLEL_WORKERS=2`、`PARALLEL=ON PARALLEL_WORKERS=4` |
+| 规模 | 3 套实验脚本共 75 例 → 225 次配置比对；另有可移植脚本 [`util/fl_diff_test.py`](../util/fl_diff_test.py)（44 例 × 4 配置）可在任何装有两个扩展的主机上复跑 |
+
+用例覆盖：引号/转义/自定义 `DELIMITER`+`QUOTE`+`ESCAPE`/CRLF/裸 CR/空行与纯空白行/缺列与多列/
+未闭合引号/`NULL` 串/`FORCE_NOT_NULL`/`ENCODING`/类型转换失败（int、numeric、date）/`SKIP`+`LIMIT`
+（含窗口跨引号记录）/`LIMIT=0`/`SKIP` 超出 EOF/唯一索引与主键冲突（`ON_DUPLICATE_KEEP=NEW|OLD`）/
+`WRITER=BUFFERED`/`WRITER=PARALLEL`/`MULTI_PROCESS`/`PARSE_ERRORS=0` 与 `=2`/3 万~20 万行输入/
+超过 1 MiB 读块的记录/引号与 3 字节 UTF-8 字符跨读块边界/定长 `SKIP`、`LIMIT`、`SKIP`+`LIMIT`
+与尾部残记录。
+
+| 配置 | 结果（四个主版本一致） |
+|---|---|
+| `PARALLEL=OFF`（75 例） | **75/75 与 oracle 完全一致**（结果行、摘要、消息严重级） |
+| `PARALLEL=ON` w=2 / w=4（150 例） | **120/150 一致**，30 例为已文档化的并行原子中止（被拒记录：WARNING 相同，表为空 vs oracle 的"错误前的行"） |
+| 合计 mismatch | **0**（每版本 225 次比对，总计 900 次） |
+
+该审计查出并修掉 4 个真缺陷（并行错误吸收、`SKIP` 行/记录语义、首个被拒记录后的不确定超集、
+被跳过超长行的缓冲增长），详见
+[CHANGES.zh-CN.md](CHANGES.zh-CN.md#17-与上游-pg_bulkload-的差分审计2026-11-10)。
+
+**15.19 / 16.15 / 17.11 / 18.6** 上重跑结果相同（合计 900 次比对）。PG **19rc1** 无 oracle：上游
+3.1.23 无法在其上编译（`nodes.h: unknown type name 'Datum'`，正是我们 `bin/pgut/pgut-list.h`
+修掉的问题），故 19rc1 由单主版本验收（§9）与 90/90、44/44 套件覆盖。
+
+修后回归：`fastload_verify.py` **90/90 PASS**、`fastload_verify_fixed.py` **44/44 PASS**、
+`fl_ver_test.sh` 在 15.19 / 16.15 / 17.11 / 19rc1 全部 PASS。
+
+---
+
+## 11. 进度显示验证（2026-11-10）
+
+`PROGRESS=ON` 必须数字正确、节奏正确、边界正确，且无可测开销。脚本 `_t_progress.py`，PG 18.6，
+15 个用例，输入为 1 GiB TPC-H `lineitem.csv`（7,375,042 行）与生成的 100 MiB 定长文件
+（1,638,400 行）。
+
+| 检查项 | 结果 |
+|---|---|
+| 不写 `PROGRESS` / `PROGRESS=OFF` | 0 行进度（对既有用户零影响） |
+| 只写 `PROGRESS_INTERVAL` | 自动开启（串行 1 GiB、200 ms → 36 行） |
+| 串行 1 GiB，间隔 200 ms | 36 行 / 6.9 s；收尾 `100.0%`，行数 `7,375,042` = SRF `count` |
+| `PARALLEL=ON` w=4，间隔 200 ms | 10 行 / 1.7 s；收尾行数一致 |
+| `PARALLEL=ON` auto（15），默认 1000 ms | 3 行（启动 / 一次更新 / 收尾） |
+| `LIMIT=1000000` | 百分比切换为按行（`100.0% of 1,000,000 rows`），reader 停在 1 GiB 中的 139 MiB |
+| 定长 100 MiB，间隔 100 ms | 3 行；收尾行数 `1,638,400` = SRF `count` |
+| `PROGRESS_INTERVAL=50` | 报错 `PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds` |
+| 百分比单调性与上界 | 严格不减，永不超过 100.0 |
+| 开销（串行 1 GiB，三次交错运行中位数） | 不开 6 922 ms vs 开 6 917 ms（**−0.07%**，噪声范围） |
+
+没有任何用例出现行数不符、缺收尾行，或未开启时多出输出。CSV 90/90、定长 44/44 不受影响
+（该选项默认关闭）。
+
+---
+
+## 12. 结论
+
+当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8）、上游等价性（与
+pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、进度显示（15/15 用例、收尾数字精确、开销不可测）、
+构建（release + debug 双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、定长 1.82×）、
+内存生命周期（全 palloc、无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）与版权合规
+（保留原版权 + 明确署名与非背书）八个维度达到交付标准。
 
 残留风险均可归因于环境限制或明确的设计取舍，已在 §8 与 [OPTIMIZATION.md](OPTIMIZATION.md)
 中写明，并给出相应的使用建议（例如冷缓存场景的 worker 数选择、需要容错时使用 `PARALLEL=OFF`）。

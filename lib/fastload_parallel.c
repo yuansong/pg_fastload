@@ -43,6 +43,7 @@
 #include "binary.h"
 #include "logger.h"
 #include "pg_profile.h"
+#include "progress.h"
 #include "reader.h"
 #include "writer.h"
 
@@ -713,6 +714,21 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 					wt->count += 1;
 					MemoryContextReset(wt->context);
 					FL_TICK(prof_par_write, tick);
+
+					/*
+					 * PROGRESS=ON.  The reader publishes its byte count in the
+					 * control block; sampling it every 1024 rows keeps the
+					 * spinlock out of the per-row path.
+					 */
+					if ((wt->count & 1023) == 0)
+					{
+						int64	read_bytes;
+
+						SpinLockAcquire(&hdr->mutex);
+						read_bytes = hdr->bytes_read;
+						SpinLockRelease(&hdr->mutex);
+						ProgressUpdate(wt->count, read_bytes);
+					}
 				}
 				else if (r == SHM_MQ_DETACHED)
 				{
@@ -743,6 +759,24 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 				pg_usleep(1000L);	/* 1ms; workers are producing */
 				FL_TICK(prof_par_wait, tick);
 			}
+		}
+
+		/*
+		 * Close the progress stream with the exact final numbers.  A load
+		 * that is about to be aborted by the parse-error contract below is
+		 * not "done", so it gets no closing line.
+		 */
+		{
+			int64	read_bytes;
+			int		nerr;
+
+			SpinLockAcquire(&hdr->mutex);
+			read_bytes = hdr->bytes_read;
+			nerr = hdr->parse_errors;
+			SpinLockRelease(&hdr->mutex);
+
+			if (nerr == 0)
+				ProgressFinish(wt->count, read_bytes);
 		}
 
 		/*

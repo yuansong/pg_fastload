@@ -34,6 +34,7 @@
 
 #include "common.h"
 #include "logger.h"
+#include "progress.h"
 #include "reader.h"
 #include "writer.h"
 #include "pg_btree.h"
@@ -290,6 +291,14 @@ pg_fastload(PG_FUNCTION_ARGS)
 		WriterDumpParams(wt);
 		LoggerLog(INFO, "\n");
 
+		/*
+		 * PROGRESS=ON: publish a snapshot every PROGRESS_INTERVAL ms.  The
+		 * statement otherwise stays silent until it returns, which makes a
+		 * multi-minute load over a large file impossible to watch.
+		 */
+		ProgressInit(rd->infile, rd->progress, rd->progress_interval,
+					 rd->limit);
+
 		FASTLOAD_PROFILE(&prof_init);
 
 		/*
@@ -346,9 +355,19 @@ pg_fastload(PG_FUNCTION_ARGS)
 				FASTLOAD_PROFILE_POP();
 				FASTLOAD_PROFILE(&prof_writer);
 
+				/* PROGRESS=ON: one integer compare per row, see progress.c */
+				ProgressUpdate(wt->count, rd->parser->bytes_read);
+
 				MemoryContextReset(wt->context);
 				FASTLOAD_PROFILE(&prof_reset);
 			}
+
+			/*
+			 * Close the progress stream even when the loop ended on EOF or
+			 * LIMIT before the first interval elapsed, so PROGRESS=ON always
+			 * shows the final row count and byte count.
+			 */
+			ProgressFinish(wt->count, rd->parser->bytes_read);
 		}
 
 		MemoryContextSwitchTo(ctx);
