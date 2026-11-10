@@ -5,6 +5,7 @@
 #
 SRCS = \
 	binary.c \
+	export.c \
 	fastload_parallel.c \
 	fastload_worker.c \
 	logger.c \
@@ -21,6 +22,7 @@ SRCS = \
 	writer.c \
 	writer_binary.c \
 	writer_buffered.c \
+	writer_csv.c \
 	writer_direct.c \
 	writer_parallel.c \
 	pgut/pgut-be.c \

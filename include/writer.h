@@ -58,6 +58,7 @@ struct Writer
 
 	MemoryContext		context;
 	int64				count;
+	int64				bytes;	/**< bytes this writer has produced */
 
 	bool			truncate;		/* truncate before load? */
 	bool			verbose;		/* output error message to server log? */
@@ -68,6 +69,7 @@ struct Writer
 	bool			multi_process;	/* multi process load? */
 
 	char		   *output;			/**< output file or relation name */
+	char		   *sample_output;	/**< OUTPUT= for the sample control file */
 	Oid				relid;			/**< target relation id */
 	Relation		rel;			/**< target relation */
 	TupleDesc		desc;			/**< tuple descriptor */
@@ -80,6 +82,10 @@ extern Writer *CreateDirectWriter(void *opt);
 extern Writer *CreateBufferedWriter(void *opt);
 extern Writer *CreateParallelWriter(void *opt);
 extern Writer *CreateBinaryWriter(void *opt);
+extern Writer *CreateCsvWriter(void *opt);
+
+/* Export: describe the row type the tuples handed to a binary writer have. */
+extern void BinaryWriterSetSourceDesc(Writer *writer, TupleDesc src);
 
 extern Writer *WriterCreate(char *type, bool multi_process);
 extern void WriterInit(Writer *self);

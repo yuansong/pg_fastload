@@ -47,9 +47,10 @@
 /* Fixed layout of one status record; the reader side is lib/progress.c. */
 typedef struct ProgressInfo
 {
-	const char *infile;			/* INPUT, as given by the user */
-	const char *datname;		/* database running the load */
-	const char *relname;		/* fully qualified target table */
+	const char *direction;		/* "load" or "export"; NULL means load */
+	const char *infile;			/* INPUT (load) or OUTPUT (export) */
+	const char *datname;		/* database running the operation */
+	const char *relname;		/* fully qualified table */
 	const char *type;			/* resolved TYPE: CSV / BINARY / TUPLE ... */
 	const char *mode;			/* "serial" or "parallel" */
 	bool		enabled;		/* PROGRESS = ON */

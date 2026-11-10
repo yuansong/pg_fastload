@@ -5,3 +5,5 @@ pg_fastload_worker_main 4
 pg_fastload_reader_main 5
 pg_fastload_progress    6
 pg_finfo_pg_fastload_progress 7
+pg_fastload_export      8
+pg_finfo_pg_fastload_export 9

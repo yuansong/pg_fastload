@@ -199,3 +199,30 @@ because the fixed overhead (DSM creation, bgworker startup, on the order of tens
 6. **Indexed loads**: index cost is about half of the total indexed-load time (1 GiB measured ≈1.9 s), and that phase runs serially in
    the leader; for bulk imports it is recommended to first drop non-essential indexes (spool batch build is already 8.3× faster than "post-load `CREATE INDEX`",
    see [OPTIMIZATION.md](OPTIMIZATION.md#84-w-3-parallel-b-tree-index-build)).
+
+---
+
+## 8. Export Throughput: `pg_fastload_export` vs `COPY TO`
+
+The reverse direction has no parallelism (the source is a cursor, the target is one file), so the only
+meaningful comparison is against `COPY`:
+
+| Item | Value |
+|---|---|
+| Table | `public.exp_big`: 8,000,000 rows / 521 MB heap (`id int4` + `pad text` (md5)) |
+| Output | CSV, 326,888,896 B (312 MiB) |
+| Environment | as in §2: 16 vCPU / 7.3 GiB, page cache, median of 3 |
+| `COPY ... TO ... (FORMAT csv)` | 0.95 s (≈344 MB/s, 8.4M rows/s) |
+| `pg_fastload_export(TYPE=CSV)` | **0.89 s** (≈367 MB/s, 9.0M rows/s) |
+| Output equality | `cmp`-identical |
+
+The difference comes from buffering and call overhead, not from the algorithm: the export formats each
+field by calling its output function straight into a 4 MiB `StringInfo`, while `COPY` goes through a
+`DestReceiver` with one callback per row. Both are single-process sequential writers, so the conclusion
+is "same class, slightly faster", not "orders of magnitude".
+
+Fixed-width export (`TYPE=BINARY/FIXED`) is not timed separately: its write path is
+`Write_char`/`memcpy` directly into the buffer, which is cheaper than CSV text formatting and cannot
+become the bottleneck; `NULLIF` and width checks cost one pass in the parser.
+
+---

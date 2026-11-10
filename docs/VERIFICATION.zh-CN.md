@@ -14,6 +14,7 @@
 | 项目 | `pg_fastload`（独立开源提交，版本 `1.0.0`） |
 | 上游 | `pg_bulkload` 3.1.23，HEAD `798e0f2`，BSD 3-Clause 风格许可 |
 | 并行覆盖 | `TYPE=CSV` 与 `TYPE=BINARY / FIXED`（定长）；`TUPLE / FUNCTION` 走串行 |
+| 导出覆盖 | `pgfastload.pg_fastload_export()`：`TYPE=CSV / BINARY / FIXED`，源为 `TABLE=` 或 `QUERY=`（单进程，见 §12） |
 | 对外行为 | `PARALLEL=ON` 时上述类型默认走多进程并行；**不引入任何额外类型名**，`TYPE` 仍是上游五种；`PARALLEL_WORKERS` 默认「在线 CPU 核数 − 1」 |
 | 许可 | 保留 `COPYRIGHT` 原文；新增 `LICENSE` / `NOTICE`；新增/修改文件标注 `Copyright (c) 2026, yuanyuansong`；明确未获 NTT, Inc. 背书 |
 
@@ -282,13 +283,55 @@ bgworker 真启动（日志有 `PARALLEL=ON, TYPE=CSV, workers=N` 且无 `PARALL
 
 ---
 
-## 12. 结论
+## 12. 导出功能验证（2026-11-10）
+
+随扩展交付的脚本：`util/fl_export_test.sh`（PG 18.6，`PGPORT/PGUSER/PGDATABASE` 从环境读），
+**39 项断言全部 PASS，退出码 0**。原始输出：`export_pg18.out`。
+
+| 分组 | 检查项 | 结果 |
+|---|---|---|
+| CSV 等价性 | 与 `COPY (SELECT * FROM exp_t) TO ... (FORMAT csv, HEADER)` **`cmp` 逐字节相同**；返回行数 = 5 | PASS |
+| CSV 往返 | `SKIP=1` 跳过表头回灌，内容摘要 `5\|-1683897567441736485` 与源表一致 | PASS |
+| CSV 方言 | `DELIMITER=\| QUOTE=' NULL=\N`：内嵌换行、字段内含分隔符/引号、字面量 `\N` 与 NULL 的区分都保留，回灌摘要相同 | PASS |
+| `QUERY=` | `WHERE id >= 3 ORDER BY id DESC` 生效（首条数据行 id=5，3 行）；`LIMIT=2` 返回 2 行、文件 2 行 | PASS |
+| 空表 | 返回 0，文件 0 字节 | PASS |
+| BINARY 布局 | 7 列 44 B/行 × 4 行 = **176 B**；样例 `.ctl` 的 `COL` 与 `OUT_COL` 逐项一致 | PASS |
+| BINARY 往返 | `COL=...CHAR(8)` 回灌摘要 `4\|-5144772349234490677` 与源表一致 | PASS |
+| 样例 `.ctl` | 含 `# exported from public.exp_bin`；`OUTPUT` 为文件名（不是源表名，避免手滑自追加） | PASS |
+| 补位语义 | 同一份 `.bin` 用 `COL=VARCHAR(8)` 回灌，`'xy'` 变成 `'xy      '`（长度 8）—— 文档化行为，与 `Read_varchar` 一致 | PASS |
+| FIXED 往返 | 纯文本布局（数值列用 `CHAR(n)` 承载）回灌摘要与源表一致 | PASS |
+| NULLIF | 含 NULL 的 3 行表，`OUT_COL=INTEGER NULLIF 00000000` / `CHAR(4) NULLIF '    '` 往返摘要 `3\|3014503705147286095` 一致 | PASS |
+| 错误路径 | 缺 `OUTPUT`／相对路径／`BINARY` 缺 `OUT_COL`／`FIXED`+`INTEGER`／`OUT_COL` 数量不符／目标已存在／NULL 无 `NULLIF`／未知关键字／缺 `TABLE`+`QUERY`／非 `SELECT` 的 `QUERY`／`DELIMITER=QUOTE`，11 条全部按预期报错 | PASS |
+| 进度 | 800 万行导出期间另一会话读到 `export\|running\|CSV\|serial\|true\|-\|true\|/tmp/.../big.csv`；结束后视图 0 行；产物 > 100 MB、8,000,000 行 | PASS |
+
+吞吐对照（`public.exp_big`，800 万行 / 521 MB 表 / 312 MiB CSV，热缓存 3 次）：
+
+| 操作 | 中位耗时 |
+|---|---|
+| `COPY ... TO ... (FORMAT csv)` | 0.95 s |
+| `pg_fastload_export(TYPE=CSV)` | **0.89 s** |
+
+输出 `cmp` 相同（326,888,896 B）。导出不参与并行，这是设计选择而非未完成项（见
+[ARCHITECTURE §4.1](ARCHITECTURE.zh-CN.md#41-反方向导出数据流)）。
+
+回归：导出只新增 writer 与字节计数，装载路径未改；验收后重跑 `fastload_verify.py` 与
+`fastload_verify_fixed.py` 仍为 90/90 与 44/44。
+
+多版本：导出代码在 **15.19 / 16.15 / 17.11 / 18.6 / 19rc1** 上均 `INSTALL_OK`。其中 19 上暴露
+过一个真实差异：`TimestampTzGetDatum()` 声明在 `utils/timestamp.h`，18 及以前由 `utils/builtins.h`
+间接带入，19 不再带入，导致 `export.c` 报 `implicit declaration`；补上显式 include 后通过。
+功能验收只在 18.6 上执行（与整个项目的验证范围一致）。
+
+---
+
+## 13. 结论
 
 当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8）、上游等价性（与
 pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、加载进度（五个大版本各 8/8 视图检查、收尾数字
-精确、开销不可测）、构建（release + debug 双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、
-定长 1.82×）、内存生命周期（全 palloc、无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）
-与版权合规（保留原版权 + 明确署名与非背书）八个维度达到交付标准。
+精确、开销不可测）、导出（CSV/BINARY/FIXED 39/39，CSV 与 `COPY` 逐字节相同）、构建（release +
+debug 双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、定长 1.82×）、内存生命周期（全 palloc、
+无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）与版权合规（保留原版权 + 明确署名与非
+背书）九个维度达到交付标准。
 
 残留风险均可归因于环境限制或明确的设计取舍，已在 §8 与 [OPTIMIZATION.md](OPTIMIZATION.md)
 中写明，并给出相应的使用建议（例如冷缓存场景的 worker 数选择、需要容错时使用 `PARALLEL=OFF`）。

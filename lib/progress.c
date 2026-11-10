@@ -92,6 +92,7 @@ typedef struct ProgressState
 	char	   *relname;
 	char	   *type;
 	char	   *mode;
+	char	   *direction;
 } ProgressState;
 
 static ProgressState progress;
@@ -112,6 +113,7 @@ typedef struct ProgressStatus
 	char	   *infile;
 	char	   *type;
 	char	   *mode;
+	char	   *direction;
 	char	   *state;
 } ProgressStatus;
 
@@ -332,6 +334,7 @@ fl_publish(const char *state, int64 rows, int64 bytes)
 	appendStringInfo(&buf, "infile=%s\n", progress.infile);
 	appendStringInfo(&buf, "type=%s\n", progress.type);
 	appendStringInfo(&buf, "mode=%s\n", progress.mode);
+	appendStringInfo(&buf, "direction=%s\n", progress.direction);
 	appendStringInfo(&buf, "state=%s\n", state);
 	appendStringInfo(&buf, "interval_ms=%d\n", progress.interval_ms);
 	appendStringInfo(&buf, "rows=" INT64_FORMAT "\n", rows);
@@ -504,6 +507,8 @@ fl_progress_emit(int64 rows, int64 bytes, bool final)
 	appendStringInfo(&msg, "rows %s | ", rowbuf);
 	if (progress.total_bytes > 0)
 		appendStringInfo(&msg, "%s / %s", readbuf, totalbuf);
+	else if (strcmp(progress.direction, "export") == 0)
+		appendStringInfo(&msg, "%s written", readbuf);
 	else
 		appendStringInfo(&msg, "%s read", readbuf);
 
@@ -547,8 +552,15 @@ ProgressInit(const ProgressInfo *info)
 	progress.relname = fl_safe_string(info->relname);
 	progress.type = fl_safe_string(info->type);
 	progress.mode = fl_safe_string(info->mode);
+	progress.direction = fl_safe_string(info->direction ? info->direction
+									   : "load");
 
-	if (info->infile != NULL && stat(info->infile, &st) == 0 &&
+	/*
+	 * Only a load knows the size of its input up front.  An export grows its
+	 * output as it goes, so it reports rows and a rate, never a percentage.
+	 */
+	if (strcmp(progress.direction, "load") == 0 &&
+		info->infile != NULL && stat(info->infile, &st) == 0 &&
 		S_ISREG(st.st_mode))
 		progress.total_bytes = (int64) st.st_size;
 
@@ -578,16 +590,19 @@ ProgressInit(const ProgressInfo *info)
 	{
 		char		totalbuf[48];
 		char		mesg[320];
+		bool		exporting = (strcmp(progress.direction, "export") == 0);
 
 		fl_human_bytes(progress.total_bytes, totalbuf, sizeof(totalbuf));
 		if (progress.total_bytes > 0)
 			snprintf(mesg, sizeof(mesg),
-					 "pg_fastload progress: start, input %s, interval %d ms",
+					 "pg_fastload progress: start, %s %s, interval %d ms",
+					 exporting ? "output" : "input",
 					 totalbuf, progress.interval_ms);
 		else
 			snprintf(mesg, sizeof(mesg),
-					 "pg_fastload progress: start, input size unknown, "
-					 "interval %d ms", progress.interval_ms);
+					 "pg_fastload progress: start, %s size unknown, "
+					 "interval %d ms",
+					 exporting ? "output" : "input", progress.interval_ms);
 
 		fl_notice(mesg);
 	}
@@ -726,6 +741,8 @@ fl_read_status(const char *path, ProgressStatus *st)
 			st->type = pstrdup(eq + 1);
 		else if (strcmp(line, "mode") == 0)
 			st->mode = pstrdup(eq + 1);
+		else if (strcmp(line, "direction") == 0)
+			st->direction = pstrdup(eq + 1);
 		else if (strcmp(line, "state") == 0)
 			st->state = pstrdup(eq + 1);
 	}
@@ -738,8 +755,8 @@ pg_fastload_progress(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	TupleDesc	tupdesc;
-	Datum		values[19];
-	bool		nulls[19];
+	Datum		values[20];
+	bool		nulls[20];
 	char	   *dirname;
 	DIR		   *dir;
 	struct dirent *de;
@@ -791,43 +808,48 @@ pg_fastload_progress(PG_FUNCTION_ARGS)
 			values[1] = TimestampTzGetDatum(fl_from_epoch(st.backend_start));
 			values[2] = TimestampTzGetDatum(fl_from_epoch(st.started));
 
-			if (st.datname != NULL)
-				values[3] = DirectFunctionCall1(namein,
-												CStringGetDatum(st.datname));
+			if (st.direction != NULL)
+				values[3] = PointerGetDatum(cstring_to_text(st.direction));
 			else
-				nulls[3] = true;
+				values[3] = PointerGetDatum(cstring_to_text("load"));
 
-			if (st.relname != NULL)
-				values[4] = PointerGetDatum(cstring_to_text(st.relname));
+			if (st.datname != NULL)
+				values[4] = DirectFunctionCall1(namein,
+												CStringGetDatum(st.datname));
 			else
 				nulls[4] = true;
 
-			if (st.infile != NULL)
-				values[5] = PointerGetDatum(cstring_to_text(st.infile));
+			if (st.relname != NULL)
+				values[5] = PointerGetDatum(cstring_to_text(st.relname));
 			else
 				nulls[5] = true;
 
-			if (st.type != NULL)
-				values[6] = PointerGetDatum(cstring_to_text(st.type));
+			if (st.infile != NULL)
+				values[6] = PointerGetDatum(cstring_to_text(st.infile));
 			else
 				nulls[6] = true;
 
-			if (st.mode != NULL)
-				values[7] = PointerGetDatum(cstring_to_text(st.mode));
+			if (st.type != NULL)
+				values[7] = PointerGetDatum(cstring_to_text(st.type));
 			else
 				nulls[7] = true;
 
-			values[8] = PointerGetDatum(cstring_to_text(alive ? "running" : "stale"));
+			if (st.mode != NULL)
+				values[8] = PointerGetDatum(cstring_to_text(st.mode));
+			else
+				nulls[8] = true;
+
+			values[9] = PointerGetDatum(cstring_to_text(alive ? "running" : "stale"));
 
 			elapsed = now - st.started;
 			if (elapsed < 0)
 				elapsed = 0;
-			values[9] = Float8GetDatum(elapsed);
+			values[10] = Float8GetDatum(elapsed);
 
-			values[10] = Int64GetDatum(st.rows);
-			values[11] = Int64GetDatum(st.bytes_read);
-			values[12] = Int64GetDatum(st.total_bytes);
-			values[13] = Int64GetDatum(st.total_rows);
+			values[11] = Int64GetDatum(st.rows);
+			values[12] = Int64GetDatum(st.bytes_read);
+			values[13] = Int64GetDatum(st.total_bytes);
+			values[14] = Int64GetDatum(st.total_rows);
 
 			if (st.total_rows > 0)
 				pct = 100.0 * (double) st.rows / (double) st.total_rows;
@@ -838,28 +860,28 @@ pg_fastload_progress(PG_FUNCTION_ARGS)
 			{
 				if (pct > 100.0)
 					pct = 100.0;
-				values[14] = Float8GetDatum(pct);
+				values[15] = Float8GetDatum(pct);
 			}
 			else
-				nulls[14] = true;
+				nulls[15] = true;
 
 			if (elapsed > 0)
 			{
-				values[15] = Float8GetDatum((double) st.bytes_read / elapsed);
-				values[16] = Float8GetDatum((double) st.rows / elapsed);
+				values[16] = Float8GetDatum((double) st.bytes_read / elapsed);
+				values[17] = Float8GetDatum((double) st.rows / elapsed);
 			}
 			else
 			{
-				nulls[15] = true;
 				nulls[16] = true;
+				nulls[17] = true;
 			}
 
 			if (pct > 0 && pct < 100 && elapsed > 0)
-				values[17] = Float8GetDatum(elapsed * (100.0 - pct) / pct);
+				values[18] = Float8GetDatum(elapsed * (100.0 - pct) / pct);
 			else
-				nulls[17] = true;
+				nulls[18] = true;
 
-			values[18] = Int32GetDatum((int) st.interval_ms);
+			values[19] = Int32GetDatum((int) st.interval_ms);
 
 			tuplestore_putvalues(rsinfo->setResult, tupdesc, values, nulls);
 			pfree(path);

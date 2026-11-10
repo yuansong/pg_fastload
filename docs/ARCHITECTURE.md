@@ -77,10 +77,12 @@ lib/source.c             file / STDIN / async reads
 lib/writer.c             Writer abstraction
 lib/writer_direct.c      DIRECT (bypasses shared buffers + LSF)
 lib/writer_buffered.c    BUFFERED
-lib/writer_binary.c      binary export (TUPLE / recovery path)
+lib/writer_binary.c      fixed-width file writer (shared by WRITER=BINARY and export)
+lib/writer_csv.c         the other half: CSV file writer (export only)
 lib/writer_parallel.c    PARALLEL (upstream "read here, write there" multi-process)
+lib/export.c             export entry pgfastload.pg_fastload_export(): SPI cursor scan → Writer
 lib/pg_btree.c           batched index spool build
-lib/progress.c           load progress: status records + the pg_fastload_progress SRF
+lib/progress.c           load/export progress: status records + the pg_fastload_progress SRF
 lib/pgut/*               upstream utility library (the PARALLEL writer depends on pgut-ipc.c)
 
 parallel subsystem (c) 2026 yuanyuansong
@@ -108,6 +110,32 @@ control file / SQL arguments
 Identical to upstream `pg_bulkload`. This path received only two changes unrelated to semantics: the
 default worker count now comes from the shared `FastloadDefaultWorkers()`, and `SpoolerInsert()`
 returns early when the table has no indexes.
+
+### 4.1 The other direction: export data flow
+
+An export never touches `Reader`/`Parser` (those turn bytes into tuples); it starts from tuples that
+already exist:
+
+```
+TABLE= / QUERY= arguments
+   → ParseExportOptions() → WriterCreate(TYPE): CSV → CsvWriter, BINARY/FIXED → BinaryWriter
+   → SPI_connect → SPI_cursor_open_with_args(query, read_only)
+   → [ SPI_cursor_fetch(1000) → (BINARY/FIXED: checker coerces to OUT_COL) → WriterInsert ] × N
+   → WriterClose (fsync) → ProgressFinish → SPI_finish
+```
+
+Three constraints shape it:
+
+| Constraint | Why |
+|---|---|
+| An SPI cursor rather than `table_beginscan()` | `QUERY=` and `TABLE=` share one path; the cursor brings the caller's snapshot, privileges and row visibility, exactly like a plain `SELECT` |
+| Tuples pass `wt->tchecker->checker` before `BinaryWriter` | a load takes the row type from the target `TupleDesc`; cursor tuples may carry no type OID, so `BinaryWriterSetSourceDesc()` hands the result `TupleDesc` over explicitly and the same call turns on width/range checking |
+| CSV gets its own writer, fixed-width reuses `BinaryWriter` | there was never a "write CSV" implementation (only `parser_csv.c`), while the fixed-width descriptor `COL` already existed — `OUT_COL` is its mirror image |
+
+An export is **not parallel**: the source is a cursor (one statement, one snapshot) and the target is
+a single file, so there is no repeated-file-read amplification to spread over workers; moving the
+reader/worker machinery in would only add IPC. Throughput is in the `COPY TO` class (see
+[BENCHMARK](BENCHMARK.md)).
 
 ---
 

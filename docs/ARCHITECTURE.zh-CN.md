@@ -76,10 +76,12 @@ lib/source.c             文件 / STDIN / 异步读
 lib/writer.c             Writer 抽象
 lib/writer_direct.c      DIRECT（绕过 shared buffers + LSF）
 lib/writer_buffered.c    BUFFERED
-lib/writer_binary.c      二进制导出（TUPLE/recovery 路径）
+lib/writer_binary.c      定长文件写者（`WRITER=BINARY` 与导出共用）
+lib/writer_csv.c         定长之外的另一半：CSV 文件写者（仅导出使用）
 lib/writer_parallel.c    PARALLEL（上游「主读子写」多进程）
+lib/export.c             导出入口 pgfastload.pg_fastload_export()：SPI 游标扫描 → Writer
 lib/pg_btree.c           索引 spool 批量构建
-lib/progress.c           装载进度：状态记录 + pg_fastload_progress SRF
+lib/progress.c           装载/导出进度：状态记录 + pg_fastload_progress SRF
 lib/pgut/*               上游工具库（PARALLEL writer 依赖 pgut-ipc.c）
 
 并行子系统（(c) 2026 yuanyuansong）
@@ -106,6 +108,29 @@ include/pg_profile.h     USE_PROFILE=1 阶段计时埋点
 
 与原版 `pg_bulkload` 完全一致；本项目对该路径只做过两处与语义无关的改动：
 worker 默认值改为调用统一的 `FastloadDefaultWorkers()`，以及 `SpoolerInsert()` 的无索引早退。
+
+### 4.1 反方向：导出数据流
+
+导出不经过 `Reader`/`Parser`（那是"字节 → 元组"），而是从**已经成型**的元组出发：
+
+```
+TABLE=/QUERY= 参数
+   → ParseExportOptions() → WriterCreate(TYPE)：CSV → CsvWriter，BINARY/FIXED → BinaryWriter
+   → SPI_connect → SPI_cursor_open_with_args(query, read_only)
+   → [ SPI_cursor_fetch(1000) →（BINARY/FIXED 时 checker 按 OUT_COL 转换）→ WriterInsert ] × N
+   → WriterClose（fsync）→ ProgressFinish → SPI_finish
+```
+
+三点设计约束：
+
+| 约束 | 原因 |
+|---|---|
+| 用 SPI 游标而不是 `table_beginscan()` | `QUERY=` 与 `TABLE=` 才能共用一条路径；游标自带调用方快照、权限与行可见性，与普通 `SELECT` 完全等价 |
+| 元组必须先过 `wt->tchecker->checker` 才能进 `BinaryWriter` | 装载时元组的类型来自目标表 `TupleDesc`；游标元组可能没有类型 OID，因此 `BinaryWriterSetSourceDesc()` 显式把结果行的 `TupleDesc` 交给 checker，同时完成宽度/范围校验 |
+| CSV 用独立 writer，定长复用 `BinaryWriter` | 装载侧本来就没有"写 CSV"的实现（只有 `parser_csv.c`）；而定长布局的描述符 `COL` 早已存在，导出的 `OUT_COL` 就是它的镜像 |
+
+导出**不接并行**：源是游标（单条 SQL、单快照），目标是单个文件，没有"重复读文件"的放大可摊，
+把 ①②③ 那套 reader/worker 搬过来只会增加 IPC。吞吐与 `COPY TO` 同量级（见 [BENCHMARK](BENCHMARK.md)）。
 
 ---
 

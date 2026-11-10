@@ -25,6 +25,7 @@
 15. [已知限制](#15-已知限制)
 16. [从 pg_bulkload 迁移](#16-从-pg_bulkload-迁移)
 17. [升级与卸载](#17-升级与卸载)
+18. [导出表数据（`pg_fastload_export`）](#18-导出表数据pg_fastload_export)
 
 ---
 
@@ -42,6 +43,10 @@
 **没有 `PARALLEL` 时，行为与 pg_bulkload 完全一致**；打开 `PARALLEL=ON` 后只有 ①②③ 被并行化，
 ④ 以及所有事务/约束/错误语义都留在原处。因此 `PARALLEL=ON` 是一个"可以随时打开"的开关：
 不满足条件的场景会自动回到串行路径并打印一条 INFO。
+
+反方向也有一个入口：`pgfastload.pg_fastload_export()` 把表或任意 `SELECT` 的结果写成
+CSV / BINARY / FIXED 文件，用的是同一套 Writer 与同一套 `COL`/`OUT_COL` 布局描述，
+所以导出的定长文件能被 `pg_fastload()` 原样装回去（见 [§18](#18-导出表数据pg_fastload_export)）。
 
 ### 适用场景
 
@@ -393,6 +398,20 @@ SELECT pgfastload.pg_fastload(ARRAY['INPUT=/data/b.csv','OUTPUT=public.t','PARAL
 COMMIT;
 ```
 
+反向的导出是另一个函数，签名与调用方式相同，但它读写文件而不是表：
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.t',
+  'OUTPUT=/data/t.csv',
+  'TYPE=CSV'
+]);
+-- 返回 bigint：写出的行数
+```
+
+注意 `TABLE` 在这里是**源**（装载里它是目标），`OUTPUT` 在这里是**文件**（装载里它是表名）。
+完整关键字、格式细节与往返语义见 [§18](#18-导出表数据pg_fastload_export)。
+
 ---
 
 ## 8. 命令行
@@ -628,11 +647,12 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 | `pid` | 正在装载的后端进程号 |
 | `backend_start`、`started` | 会话启动时间 / 装载开始时间 |
 | `datname`、`relname`、`infile` | 数据库、目标表、`INPUT` 指定的输入文件 |
+| `direction` | `load` 或 `export`：同一条记录也可能来自 `pg_fastload_export()`（见 [§18](#18-导出表数据pg_fastload_export)） |
 | `input_type`、`mode` | 解析出的 `TYPE`（`CSV`、`BINARY`、`FIXED` 等）与 `serial`／`parallel` |
 | `state` | 后端存活时为 `running`；被 kill 的后端留下的记录为 `stale` |
 | `elapsed_seconds` | 自 `started` 起经过的秒数 |
 | `rows` | leader 已插入的行数，即语句最终会报告的数字 |
-| `bytes_read`、`total_bytes` | reader 已消费字节数 / 输入文件大小（未知时为 `0`：STDIN、管道） |
+| `bytes_read`、`total_bytes` | reader 已消费字节数 / 输入文件大小（未知时为 `0`：STDIN、管道）。导出时 `bytes_read` 计**已写出**字节，`total_bytes` 恒为 `0` |
 | `total_rows` | `LIMIT`，未限行时为 `0` |
 | `percent` | 有 `LIMIT` 时 `rows ÷ total_rows`，否则 `bytes_read ÷ total_bytes`，都无则 `NULL` |
 | `bytes_per_second`、`rows_per_second` | 自装载开始至今的平均速率 |
@@ -724,6 +744,9 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 8. `WRITER=PARALLEL` 使用独立事务（上游行为），与调用方事务不原子。
 9. 仅在 PostgreSQL 18.6 / x86_64 Linux 上完整验证。
 10. 并行装载期间目标表持有 `AccessExclusiveLock`，与任何并发访问互斥。
+11. 导出（[§18](#18-导出表数据pg_fastload_export)）是单进程串行的，`PARALLEL` 对它无效。
+12. 定长导出用定宽字段，文本列回灌时 `CHAR(n)` 会丢尾随空格、`VARCHAR(n)` 会保留补位空格，
+    二者都不等于"精确往返"（见 [§18.5](#185-往返语义务必读这一节)）。
 
 ---
 
@@ -770,6 +793,171 @@ sudo make USE_PGXS=1 PG_CONFIG=/usr/pgsql-18/bin/pg_config uninstall
 
 卸载不会删除 `$PGDATA/pg_fastload/` 下的历史日志与 LSF 文件，可手动清理
 （若存在未完成的 `DIRECT` 装载，应先 `pg_fastload -r` 恢复再删除 LSF）。
+
+---
+
+## 18. 导出表数据（`pg_fastload_export`）
+
+装载是「文件 → 表」，导出是「表 → 文件」。两者共用同一套 `Writer` 抽象，所以同一个
+`OUT_COL` 布局既能描述导出的字节，也能描述装载期待读到的字节 —— 这是本文档里所有"往返"
+说法的来源。
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV'
+]);
+--  pg_fastload_export
+-- --------------------
+--              7375042
+```
+
+返回 `bigint`：写出的行数。
+
+### 18.1 执行模型
+
+| 环节 | 实现 | 说明 |
+|---|---|---|
+| 取行 | `SPI_cursor_open_with_args(..., read_only)` + `SPI_cursor_fetch()`，每批 1000 行 | 走查询规划器，权限、行可见性、快照与普通 `SELECT` 完全一致 |
+| 格式化 | `CsvWriter`（`lib/writer_csv.c`）或 `BinaryWriter`（`lib/writer_binary.c`） | 4 MiB 缓冲，`close()` 时 `fsync` |
+| 写文件 | 以**数据库服务端**身份 `open()`，路径必须是绝对路径 | `OUTPUT` 已存在则直接报错，绝不覆盖 |
+| 并发 | 单进程串行 | 见 18.7：源是游标、目标是单文件，没有可并行的读放大 |
+
+`TABLE=` 在内部展开为 `SELECT * FROM <table>`；要过滤、排序或只导部分列，用 `QUERY=`。
+两者互斥，必须给一个。
+
+### 18.2 关键字
+
+| 关键字 | 取值 | 默认 | 说明 |
+|---|---|---|---|
+| `TABLE=` | 关系名 | — | 源表，与 `QUERY=` 二选一 |
+| `QUERY=` | 任意 `SELECT` | — | 只读游标，`UPDATE`/`DELETE` 会被拒绝（`cannot open UPDATE query as cursor`） |
+| `OUTPUT=` | 绝对路径 | **必填** | 输出文件 |
+| `TYPE=` | `CSV` / `BINARY` / `FIXED` | `CSV` | `BINARY`/`FIXED` 是定长布局，必须给 `OUT_COL` |
+| `OUT_COL=` | 类型声明，可重复 | — | 一个输出列一个，顺序与查询输出列一致；语法与装载的 `COL` 完全相同 |
+| `DELIMITER=` `QUOTE=` `ESCAPE=` `NULL=` `HEADER=` | 单字符 / 布尔 | `,` `"` `"` 空串 `OFF` | 仅 `TYPE=CSV`，语义与 `COPY ... (FORMAT csv)` 一致 |
+| `LIMIT=` | ≥ 1 | 不限 | 最多写多少行 |
+| `LOGFILE=` | 绝对路径 | `<OUTPUT>.log` | 导出日志 |
+| `PROGRESS=` | `ON` / `OFF` | `ON` | 发布 `direction=export` 的进度记录 |
+| `PROGRESS_NOTICE=` | `ON` / `OFF` | `OFF` | 额外输出 `NOTICE` 进度行 |
+| `PROGRESS_INTERVAL=` | 100..3600000 ms | `1000` | 指定即等价于 `PROGRESS=ON` |
+
+`TYPE` 只接受这三种值，`TYPE=TUPLE` / `FUNCTION` 是装载专用的输入格式，导出无意义。
+
+### 18.3 CSV：与 `COPY` 逐字节相同
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV',
+  'HEADER=ON']);
+```
+
+```
+$ psql -c "\copy public.lineitem TO '/tmp/copy.csv' WITH (FORMAT csv, HEADER)"
+$ cmp /tmp/copy.csv /data/lineitem.csv && echo identical
+identical
+```
+
+引号规则逐条复刻 `CopyAttributeOutCSV()`：字段含 `DELIMITER`／`QUOTE`／`ESCAPE`／`\n`／`\r`
+时整体加引号并把 `QUOTE` 双写；字段内容等于 `NULL` 串时也加引号（否则无法与 NULL 区分）；
+`NULL` 串为空时空字段加引号（`""` 与空串是两个值）。默认 `NULL` 写成空字段，`NULL=\N`
+可让空字段与 NULL 分道扬镳 —— 与 `COPY` 的选择一致。
+
+- `HEADER=ON` 写一行列名（来自结果行的 `TupleDesc`，`QUERY=` 里的表达式列可能叫 `?column?`）。
+- 空表 + 无 `HEADER` → 0 字节文件；空表 + `HEADER=ON` → 只有表头一行。
+- 吞吐：800 万行 / 312 MiB 的表，热缓存下导出 0.89 s（`COPY TO` 0.95 s，输出 `cmp` 相同）。
+  两者都是单进程顺序写，导出略快是因为 4 MiB 缓冲 + 无 per-row 的 `DestReceiver` 开销。
+
+### 18.4 BINARY / FIXED：定长布局与样例控制文件
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.bin',
+  'TYPE=BINARY',
+  'OUT_COL=INTEGER',      -- l_orderkey
+  'OUT_COL=INTEGER',      -- l_partkey
+  'OUT_COL=INTEGER',      -- l_suppkey
+  'OUT_COL=INTEGER',      -- l_linenumber
+  'OUT_COL=DOUBLE',       -- l_quantity
+  'OUT_COL=DOUBLE',       -- l_extendedprice
+  ...]);
+```
+
+| 声明 | 宽度 | 编码 |
+|---|---|---|
+| `SMALLINT` / `INTEGER` / `BIGINT` | 2 / 4 / 8 | 小端原生二进制，与装载端 `COL` 同义 |
+| `FLOAT` / `DOUBLE` | 4 / 8 | IEEE 754 |
+| `CHAR(n)` / `VARCHAR(n)` / 裸数字 `n` | n | 文本，右侧补空格到 n 字节 |
+
+`TYPE=FIXED` 与 `BINARY` 的字节布局完全相同，区别只在**允许的声明**：`FIXED` 是定长文本
+格式，只接受 `CHAR(n)` / `VARCHAR(n)`，写 `OUT_COL=INTEGER` 会被拒绝
+（`TYPE=FIXED writes text only`）。数值列想用原生字节序就用 `BINARY`。
+
+导出还会在 `<OUTPUT>.ctl` 写一份样例控制文件，可以直接对着它改：
+
+```ini
+INPUT = /data/lineitem.bin
+# exported from public.lineitem
+OUTPUT = lineitem
+...
+TYPE = BINARY
+COL = INTEGER (4)
+...
+```
+
+`OUTPUT` 取文件名（`lineitem.bin` → `lineitem`），**不是**源表名：样例描述的是一个文件，
+装进哪张表由你决定；默认成源表会让一次手滑的 `pg_fastload lineitem.bin.ctl` 把数据追回源表。
+导出与装载走的是同一份布局代码，所以 `TYPE=BINARY` 的样例同样可以装 `TYPE=FIXED` 导出的
+纯文本文件（`BINARY` 与 `FIXED` 的读取端是同一套定长解析）。
+
+### 18.5 往返语义（务必读这一节）
+
+| 情形 | 结果 |
+|---|---|
+| 数值 / 布尔 / 时间等定长列 | `BINARY` 精确往返（`OUT_COL` 与 `COL` 声明一致即可） |
+| 文本列，回灌用 `COL=CHAR(n)` | 精确，但**原值的尾随空格会丢**（`CHAR` 语义，`Read_char` 裁空格） |
+| 文本列，回灌用 `COL=VARCHAR(n)` | 补位空格**保留**：`'xy'` 写进 8 字节字段，回灌得到 `'xy      '`（8 字符） |
+| `NULL` | 定长格式没有独立 NULL 位，必须 `OUT_COL=TYPE NULLIF <模式>`；列里真有 NULL 而没声明 `NULLIF` 会报错 |
+
+第三条是格式本身的限制，不是缺陷：定长字段一定被补满，`VARCHAR` 的读取端按声明长度原样保留，
+`CHAR` 的读取端按 `CHAR` 语义裁掉尾随空格。因此
+
+- 想要「导回去和原来一模一样」→ 文本列用 `OUT_COL=CHAR(n)`，回灌 `COL=CHAR(n)`；
+- 想保留尾随空格 → 只能 `VARCHAR` + 定宽填满（`length(v) = n`），或用 `TYPE=CSV`。
+
+`NULL` 的处理是显式的：如果不给 `NULLIF` 而数据里出现了 NULL，导出会报
+`column N is NULL and OUT_COL gives it no representation`，而不是静默写 0 或空格。
+
+宽度与取值范围在写之前校验：`value too long for type character(n)`、无符号类型的上界都会
+在对应的行上抛错，整条语句回滚，文件留下已写入的部分（`LOGFILE` 里有失败的列号）。
+
+### 18.6 进度
+
+导出与装载用同一张视图（[§12.4](#124-加载进度)），记录里 `direction = export`、
+`infile` 是输出文件、`bytes_read` 是已写出的字节数。因为不知道总量，`percent` 与 `eta_seconds`
+为 `NULL`，`rows_per_second`、`bytes_per_second` 照常有：
+
+```
+ pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | bytes_read
+------+---------+----------------+-----------+------------+--------+---------+---------+------------
+ 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
+```
+
+### 18.7 限制
+
+1. **单进程串行**。`PARALLEL` 关键字对导出无效（不报错，也不产生并行）。要做并行导出，
+   用 `COPY` 按分区／范围切成多条语句并发跑。
+2. **只读但持快照**：导出在调用方快照下扫描，长导出会拖住 `VACUUM` 的 `oldest xmin`。
+3. **目标文件必须是服务端本地路径、绝对路径、且不存在**。
+4. **需要超级用户**（与装载一致：写文件是服务端行为）。
+5. `TYPE=FIXED` 只支持字符类型；`OUT_COL` 数量必须等于输出列数（CSV 不需要 `OUT_COL`）。
+6. `QUERY=` 只接受单条 `SELECT`（不能带 `;`，不能是 `WITH ... INSERT`）。
+7. 生成样例控制文件的 `OUTPUT` 是文件名，回灌前要改成目标表；样例永远写 `TYPE = BINARY`
+   （`FIXED` 的纯文本布局同样适用）。
 
 ---
 

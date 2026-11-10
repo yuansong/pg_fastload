@@ -24,6 +24,27 @@ CREATE FUNCTION pgfastload.pg_fastload(
 AS 'MODULE_PATHNAME', 'pg_fastload' LANGUAGE C VOLATILE STRICT;
 
 /*
+ * Table export: the other direction.
+ *
+ *     SELECT pgfastload.pg_fastload_export(ARRAY[
+ *       'TABLE=public.lineitem',
+ *       'OUTPUT=/data/lineitem.csv',
+ *       'TYPE=CSV'
+ *     ]);
+ *
+ * SOURCE is TABLE= or QUERY=; OUTPUT is the file.  TYPE=CSV writes a COPY
+ * style CSV file, TYPE=BINARY / FIXED write the fixed-width formats, whose
+ * per-column layout is given with OUT_COL (and a sample control file is
+ * written next to the data).  Returns the number of rows written.
+ */
+CREATE FUNCTION pgfastload.pg_fastload_export(
+	IN options text[]
+)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'pg_fastload_export' LANGUAGE C VOLATILE STRICT;
+
+
+/*
  * Load progress.
  *
  * A pg_fastload() call occupies its session until it returns, so progress is
@@ -40,6 +61,7 @@ CREATE FUNCTION pgfastload.fl_progress_rows(
 	OUT pid integer,
 	OUT backend_start timestamp with time zone,
 	OUT started timestamp with time zone,
+	OUT direction text,
 	OUT datname name,
 	OUT relname text,
 	OUT infile text,
@@ -67,4 +89,5 @@ CREATE VIEW pgfastload.pg_fastload_progress AS
 	SELECT * FROM pgfastload.fl_progress_rows();
 
 COMMENT ON VIEW pgfastload.pg_fastload_progress IS
-	'Load progress of pg_fastload() calls currently running in this cluster';
+	'Progress of pg_fastload() loads and pg_fastload_export() exports '
+	'currently running in this cluster';

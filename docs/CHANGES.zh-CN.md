@@ -365,9 +365,10 @@ SELECT * FROM pgfastload.pg_fastload_progress;
  4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 |  1073741824
 ```
 
-视图共 19 列：`pid`、`backend_start`、`started`、`datname`、`relname`、`infile`、`input_type`、
-`mode`、`state`、`elapsed_seconds`、`rows`、`bytes_read`、`total_bytes`、`total_rows`、`percent`、
-`bytes_per_second`、`rows_per_second`、`eta_seconds`、`interval_ms`。
+视图共 20 列：`pid`、`backend_start`、`started`、`direction`（第 20 节加入，`load`/`export`）、
+`datname`、`relname`、`infile`、`input_type`、`mode`、`state`、`elapsed_seconds`、`rows`、
+`bytes_read`、`total_bytes`、`total_rows`、`percent`、`bytes_per_second`、`rows_per_second`、
+`eta_seconds`、`interval_ms`。
 
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
@@ -384,7 +385,7 @@ NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 1
 | 文件 | 改动 |
 |---|---|
 | `include/progress.h`、`lib/progress.c` | 重写：原子替换的状态记录（`$PGDATA/pg_fastload/progress/<pid>.status`）、按 pid 存活状态清理陈旧记录、把记录变成行的 `pg_fastload_progress()` SRF |
-| `lib/pg_fastload.sql.in` | `pgfastload.fl_progress_rows()`（19 个 OUT 列，`RETURNS SETOF record`，`EXECUTE` 从 `PUBLIC` 收回）与 `pgfastload.pg_fastload_progress` 视图 |
+| `lib/pg_fastload.sql.in` | `pgfastload.fl_progress_rows()`（20 个 OUT 列，`RETURNS SETOF record`，`EXECUTE` 从 `PUBLIC` 收回）与 `pgfastload.pg_fastload_progress` 视图 |
 | `lib/exports.txt` | `pg_fastload_progress`、`pg_finfo_pg_fastload_progress` |
 | `include/reader.h`、`lib/reader.c` | `PROGRESS` 默认改为 `ON`；新增 `PROGRESS_NOTICE`；保留 `Reader.type` 供记录使用；三者都写入装载日志 |
 | `lib/pg_fastload.c` | 组装一份 `ProgressInfo`（库、表、`TYPE`、`serial`/`parallel`）；错误路径上 `ProgressAbort()` |
@@ -444,6 +445,94 @@ CSV 90/90、定长 44/44 与多版本验收均不受影响。
 
 五个分版本分支已从本地与远端删除。日常开发使用 `master`；远端残留的 `REL_18_STABLE` 是原先的
 默认分支指针，在 Settings → Branches 里把默认分支切到 `master` 后即可删除。
+
+---
+
+## 20. 导出：`pg_fastload_export()`（2026-11-10）
+
+装载一直是单向的：文件 → 表。需要把表写成文件时，用户只能退回 `COPY`；上游虽然有一个
+`WRITER=BINARY`，但它只能把**本次装载的输入流**序列化成定长文件，起点仍然是 `INPUT=`，
+没有任何办法从一张表出发，CSV 更是连写者都没有。这一节补上反方向：
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV']);
+-- 7375042
+```
+
+### 20.1 为什么是「同一套 Writer + SPI 游标」
+
+| 决策 | 理由 |
+|---|---|
+| 复用 `Writer` 抽象而不是新写一条输出管线 | 装载的 `COL` 描述符已经定义了定长文件的每一个字节；导出用 `OUT_COL` 描述同一件事，往返能力就是免费的 |
+| 扫描用 `SPI_cursor_open_with_args(NULL, q, ..., read_only=true)` | `TABLE=` 与 `QUERY=` 才能共用一条路径；游标自带调用方快照、权限检查与行可见性，和普通 `SELECT` 完全一致；非 `SELECT` 由游标本身拒绝 |
+| CSV 新写一个 `CsvWriter` | 装载侧只有 `parser_csv.c`（读），没有任何写 CSV 的代码；`COPY` 的引号规则必须逐条复刻才能保证字节相同 |
+| BINARY/FIXED 复用 `BinaryWriter` | 它本来就是「把元组按 `COL` 布局写文件」的那一半，装载时用于 spool；导出正是它的第二个用户 |
+| 每批 1000 行 `SPI_cursor_fetch` | 摊薄 SPI 往返，又不让宽行在两次取数之间把 SPI 上下文钉住几百 MB |
+
+新增/修改文件：
+
+| 文件 | 内容 |
+|---|---|
+| `lib/export.c`（新） | `pg_fastload_export()`：两遍解析选项（先定 `TYPE` 决定 writer，再把其余关键字交给该 writer）、SPI 游标扫描、逐行 `WriterInsert`、进度发布、错误路径 `ProgressAbort` + `WriterClose(onError)` |
+| `lib/writer_csv.c`（新） | `CreateCsvWriter()`：`CsvWriterInsert` 逐列 `getTypeOutputInfo` + `OutputFunctionCall`，`csv_put_field()` 复刻 `CopyAttributeOutCSV()` 的五条引号规则；4 MiB 缓冲；`DELIMITER`/`QUOTE`/`ESCAPE`/`NULL`/`HEADER`/`OUTPUT`；方言在打开文件前校验（分隔符与引号不能相同、都不能是换行、`NULL` 串不能含分隔符或引号） |
+| `include/export.h`（新） | 函数声明 |
+| `include/writer.h` | `CreateCsvWriter()`、`BinaryWriterSetSourceDesc()`；`struct Writer` 增加 `bytes`（已产出字节，进度用）与 `sample_output`（样例控制文件里的来源注释） |
+| `lib/writer_binary.c` | 新增 `BinaryWriterSetSourceDesc()`；`bytes` 累计；NULL 无 `NULLIF` 时的报错信息改为可操作的 `column N is NULL and OUT_COL gives it no representation` + hint；样例控制文件加一行 `# exported from <table>` |
+| `lib/progress.c`、`include/progress.h` | 状态记录增加 `direction`（`load`/`export`）；只有装载才计算 `total_bytes`；视图第 4 列 `direction`，共 20 列 |
+| `lib/pg_fastload.sql.in` | `pgfastload.pg_fastload_export(text[]) RETURNS bigint`；`fl_progress_rows()` 增加 `OUT direction text` |
+| `lib/exports.txt` | `pg_fastload_export`、`pg_finfo_pg_fastload_export` |
+| `lib/Makefile` | `SRCS` 增加 `export.c`、`writer_csv.c` |
+
+### 20.2 三个踩过的坑
+
+1. **游标元组没有类型 OID。** `BinaryWriter` 的 checker 原本从元组头部的 `HeapTupleHeaderGetTypeId`
+   拿源类型（装载时元组由目标表的 `TupleDesc` 现造，一定有）。游标交出来的元组没有，于是报
+   `type with OID 0 does not exist`。修法：导出显式调用 `BinaryWriterSetSourceDesc(wt, desc)`，
+   把结果行的 `TupleDesc` 交下去，并把 checker 切成 `BinaryWriterCheckerTuple`（唯一会做宽度
+   与取值范围校验的变体）。
+2. **样例控制文件的 `OUTPUT` 不能指向源表。** 上游的默认值是文件名去掉扩展名；一度改成源表名
+   看似更贴心，实测 `pg_fastload b.bin.ctl` 直接把 4 行追加回源表（`TRUNCATE = NO`），把它变成
+   8 行。现在的做法：`OUTPUT` 保持文件名，另加一行 `# exported from public.t` 说明来源 —— 手滑
+   只会得到 `relation "b" does not exist`，不会改数据。
+3. **定长格式的文本列没有「精确往返」。** 字段一律补空格到声明宽度，而装载端 `Read_char`
+   （`COL=CHAR(n)`）裁尾随空格、`Read_varchar`（`COL=VARCHAR(n)`）原样保留。所以 `'xy'` 写进
+   8 字节字段后，用 `VARCHAR(8)` 回灌得到 `'xy      '`，用 `CHAR(8)` 才还原成 `'xy'`（代价是
+   原值自带的尾随空格会丢）。这是格式的性质而非缺陷，写进手册 §18.5 并用两条断言钉住：
+   同一份 `.bin`，`CHAR(8)` 回灌摘要等于源表、`VARCHAR(8)` 回灌摘要等于补位后的内容。
+
+### 20.3 性能
+
+导出是单进程串行的（源是游标、目标是单文件，没有读放大可摊），因此不接 `PARALLEL`。
+与 `COPY TO` 同量级并略快，因为 4 MiB 缓冲且没有 per-row `DestReceiver`：
+
+| 操作 | 800 万行 / 312 MiB（热缓存，3 次中位） | 输出 |
+|---|---|---|
+| `COPY ... TO ... (FORMAT csv)` | 0.95 s | 326,888,896 B |
+| `pg_fastload_export(TYPE=CSV)` | **0.89 s** | 326,888,896 B（`cmp` 相同） |
+
+### 20.4 验证
+
+`util/fl_export_test.sh`（随扩展交付，PG 18.6）共 39 项断言，全部通过：
+
+- **CSV 逐字节等于 `COPY`**，且 CSV 往返（`SKIP=1` 跳过表头）内容摘要相同；
+- **方言**：`DELIMITER=|` + `QUOTE='` + `NULL=\N` 导出后原样回灌，摘要不变（含内嵌换行、
+  字段内含分隔符/引号、值为字面量 `\N` 的区分）；
+- **`QUERY=` + `LIMIT=`**：`WHERE`/`ORDER BY` 生效（首行 id=5），`LIMIT=2` 只写 2 行；
+- **空表** → 0 行、0 字节文件；
+- **BINARY**：7 列定长 44 B/行 × 4 行 = 176 B；`CHAR(8)` 回灌摘要等于源表；样例控制文件
+  记录来源且 `OUTPUT` 为文件名；`VARCHAR(8)` 回灌保留补位空格（文档化行为）；
+- **FIXED**：纯文本布局（数值列用 `CHAR(n)` 承载）回灌摘要等于源表；
+- **`NULLIF`** 让定长格式保住 NULL：3 行含 NULL 的表往返摘要相同；
+- **11 条错误路径**：缺 `OUTPUT`、相对路径、`BINARY` 缺 `OUT_COL`、`FIXED` + `INTEGER`、
+  `OUT_COL` 数量不符、目标文件已存在、NULL 未声明 `NULLIF`、未知关键字、缺 `TABLE`/`QUERY`、
+  非 `SELECT` 的 `QUERY`、`DELIMITER` 等于 `QUOTE`；
+- **进度**：800 万行导出期间另一会话读到 `export|running|CSV|serial|...`，结束后视图回到 0 行。
+
+装载侧的回归：CSV 90/90、定长 44/44 不受影响（导出只新增了 writer 与 `bytes` 计数，
+`WriterInsert`/`ReaderNext` 路径未改）。
 
 ---
 
