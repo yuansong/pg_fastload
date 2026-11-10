@@ -247,32 +247,38 @@ Regression after the fixes: `fastload_verify.py` **90/90 PASS**, `fastload_verif
 
 ---
 
-## 11. Progress Reporting Verification (2026-11-10)
+## 11. Progress View Verification (2026-11-10)
 
-`PROGRESS=ON` must be observably correct (right numbers, right cadence, right edge cases) and free of
-measurable cost. Harness: `_t_progress.py` on PG 18.6, 15 cases over the 1 GiB TPC-H `lineitem.csv`
-(7,375,042 rows) and a generated 100 MiB fixed-length file (1,638,400 rows).
+The load progress has to satisfy one property that no `NOTICE` can: it must be readable **while the
+loading session is busy**. So the checks below all start a load in one connection and read
+`pgfastload.pg_fastload_progress` from another one.
+
+Shipped harness: `util/fl_progress_test.py` (8 checks per major, 3 M-row generated CSV), run on
+**15.19 / 16.15 / 17.11 / 18.6 / 19rc1**. Raw cross-session evidence: `_t_view.py` on PG 18.6 over the
+1 GiB TPC-H `lineitem.csv` (7,375,042 rows), plus `_t_stale.py`, which `SIGKILL`s a running loader.
 
 | Check | Result |
 |---|---|
-| `PROGRESS` omitted / `PROGRESS=OFF` | 0 progress lines (no regression for existing users) |
-| `PROGRESS_INTERVAL` alone | enables reporting (36 lines at 200 ms on the serial 1 GiB load) |
-| Serial 1 GiB, interval 200 ms | 36 reports over 6.9 s; closing line `100.0%`, rows `7,375,042` = SRF `count` |
-| `PARALLEL=ON` w=4, interval 200 ms | 10 reports over 1.7 s; same closing row count |
-| `PARALLEL=ON` auto (15), default 1000 ms | 3 reports (start / one update / closing) |
-| `LIMIT=1000000` | percentage becomes row-based (`100.0% of 1,000,000 rows`), reader stopped at 139 MiB of 1 GiB |
-| Fixed-length 100 MiB, interval 100 ms | 3 reports; closing rows `1,638,400` = SRF `count` |
+| Default (no keyword) | running load visible from a second session: `datname`, `relname = public.flprog`, `input_type = CSV`, `mode = serial`, `state = running`, `interval_ms = 1000`, `total_bytes` = file size; 0 rows after the load |
+| `PROGRESS=OFF` | view empty for the whole load, nothing written under `$PGDATA/pg_fastload/progress/` |
+| `PROGRESS_INTERVAL=100` alone | publishing enabled; rows climb (2.3 M..2.8 M observed mid-load on the 3 M-row file), percent agrees with the byte ratio within 1 pp |
+| `PARALLEL=ON` w=2 | `mode = parallel`; same row count as serial |
+| `LIMIT=1000000` | `total_rows = 1000000`, `percent = rows / total_rows`, `rows` never exceeds `total_rows`; the load stops after exactly 1 M rows |
+| `PROGRESS_NOTICE=ON` | NOTICE stream restored on top of the view (4 lines at 100 ms); closing line `100.0% | done` carries the exact row count returned by the function; **off by default** (0 NOTICE lines in every other case) |
 | `PROGRESS_INTERVAL=50` | rejected: `PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds` |
-| Percentage monotonicity / bound | strictly non-decreasing, never above 100.0 |
-| Cost (serial 1 GiB, median of 3 interleaved runs) | 6 922 ms off vs 6 917 ms on (**−0.07%**, i.e. noise) |
+| Monotonicity / bounds | `rows` and `percent` never decrease, `percent` inside `0..100` |
+| Cross-session, 1 GiB serial | poll 0 → 1,117,697 rows (15.2%), poll 5 → 6.5 M; `state = running` throughout; `-- after: rows in view = 0` |
+| Cleanup | record deleted on success; `state = 'stale'` reported once and then deleted for a killed backend |
+| Cost (serial 3 M rows, median of 3 interleaved runs) | 0.434-0.442 s off vs 0.434-0.442 s on (**−0.2%..+1.9%**, i.e. noise), same on 15/16/17/19 |
 
-No case produced a mismatched row count, a missing closing line, or an extra line when the option is
-off. The CSV 90/90 and fixed-length 44/44 suites are unaffected (the option defaults to off).
+No case produced a mismatched row count, a stale record left behind, or a row in the view while
+`PROGRESS=OFF`. The CSV 90/90 and fixed-length 44/44 suites are unaffected (the record is published
+outside the row path and cannot fail a load).
 
 ---
 
 ## 12. Conclusion
 
-The current version meets the delivery criteria across eight dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (15/15 cases, exact final numbers, no measurable cost), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
+The current version meets the delivery criteria across eight dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (8/8 view checks on five majors, exact final numbers, no measurable cost), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
 
 The residual risks can all be attributed to environmental limitations or explicit design trade-offs, as documented in §8 and [OPTIMIZATION.md](OPTIMIZATION.md), along with corresponding usage recommendations (e.g., worker-count selection for cold-cache scenarios, using `PARALLEL=OFF` when fault tolerance is needed).

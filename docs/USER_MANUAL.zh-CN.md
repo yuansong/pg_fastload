@@ -352,14 +352,15 @@ CSV 语义细节见 [§9.1](#91-csv)。
 | `PARALLEL` | `ON` / `OFF` | `OFF` | 打开多进程并行加载 |
 | `PARALLEL_WORKERS` | `1`..`64` | 在线 CPU 核数 − 1（≥1） | 解析 worker 数；`≤1` 直接串行落回 |
 
-### 6.9 进度显示（pg_fastload 新增）
+### 6.9 加载进度（pg_fastload 新增）
 
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
-| `PROGRESS` | `ON` / `OFF` | `OFF` | 装载过程中按间隔输出一行进度 |
-| `PROGRESS_INTERVAL` | `100`..`3600000`（毫秒） | `1000` | 两行之间的最小间隔；**指定该参数等价于 `PROGRESS=ON`** |
+| `PROGRESS` | `ON` / `OFF` | `ON` | 为本次装载发布一条状态记录，任何会话都可通过 `pgfastload.pg_fastload_progress` 读取 |
+| `PROGRESS_INTERVAL` | `100`..`3600000`（毫秒） | `1000` | 两条状态记录之间的最小间隔；**指定该参数等价于 `PROGRESS=ON`** |
+| `PROGRESS_NOTICE` | `ON` / `OFF` | `OFF` | 额外向装载客户端（及 `LOGFILE`）输出 `NOTICE` 进度行 |
 
-输出格式与开销见 [§12.4](#124-加载进度)。
+视图、列含义与开销见 [§12.4](#124-加载进度)。
 
 ---
 
@@ -601,43 +602,78 @@ SELECT pid, backend_type, state FROM pg_stat_activity WHERE backend_type LIKE '%
 ### 12.4 加载进度
 
 `pg_fastload()` 是一次 SQL 调用，不加处理的话直到返回都不打印任何东西 —— 100 GB 数据跑半小时
-会让人心里没底。`PROGRESS=ON` 会按固定间隔打印快照：
+会让人心里没底。让装载会话自己"打印"进度也没用：忙的正是那个会话，它的客户端被一条还没结束的
+语句阻塞着。所以进度必须**发布**出来，从别的地方读取：
 
 ```sql
+-- 会话 1：接下来半小时都很忙
 SELECT * FROM pgfastload.pg_fastload(ARRAY[
   'INPUT=/data/lineitem.csv',
   'OUTPUT=public.lineitem',
-  'PARALLEL=ON',
-  'PROGRESS=ON',
-  'PROGRESS_INTERVAL=1000'   -- 毫秒，默认 1000
+  'PARALLEL=ON'
 ]);
+
+-- 会话 2，或监控采集程序，或同实例的另一个数据库
+SELECT * FROM pgfastload.pg_fastload_progress;
 ```
 
 ```
-NOTICE:  pg_fastload progress: start, input 1024.0 MiB, interval 1000 ms
-NOTICE:  pg_fastload progress: 12.6% (129.0 MiB / 1024.0 MiB) | rows 927,744 | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
-NOTICE:  pg_fastload progress: 50.0% (512.0 MiB / 1024.0 MiB) | rows 3,687,521 | 136.4 MiB/s | 982.0k rows/s | elapsed 00:00:03 | ETA 00:00:03
-NOTICE:  pg_fastload progress: 100.0% (1024.0 MiB / 1024.0 MiB) | rows 7,375,042 | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+ pid  | datname |    relname      | input_type |  mode    | state   | elapsed_seconds |  rows   | bytes_read | total_bytes
+------+---------+-----------------+------------+----------+---------+-----------------+---------+------------+-------------
+ 4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 | 1073741824
 ```
 
-| 字段 | 含义 |
+| 列 | 含义 |
 |---|---|
-| 百分比 | 已读字节 ÷ 输入文件大小；输入大小未知时退化为 *已装行数 ÷ `LIMIT`*，两者都没有（STDIN／管道）时整个百分比省略 |
+| `pid` | 正在装载的后端进程号 |
+| `backend_start`、`started` | 会话启动时间 / 装载开始时间 |
+| `datname`、`relname`、`infile` | 数据库、目标表、`INPUT` 指定的输入文件 |
+| `input_type`、`mode` | 解析出的 `TYPE`（`CSV`、`BINARY`、`FIXED` 等）与 `serial`／`parallel` |
+| `state` | 后端存活时为 `running`；被 kill 的后端留下的记录为 `stale` |
+| `elapsed_seconds` | 自 `started` 起经过的秒数 |
 | `rows` | leader 已插入的行数，即语句最终会报告的数字 |
-| `read` | reader 已消费的字节（串行路径来自解析器，并行路径来自唯一的 reader 进程） |
-| `…/s` | 语句开始至今的平均字节速率与行速率 |
-| `ETA` | 剩余字节 ÷ 平均字节速率（只在有百分比时给出） |
-| `\| done` | 收尾行，恰好输出一次；即使装载短于一个间隔也会输出 |
+| `bytes_read`、`total_bytes` | reader 已消费字节数 / 输入文件大小（未知时为 `0`：STDIN、管道） |
+| `total_rows` | `LIMIT`，未限行时为 `0` |
+| `percent` | 有 `LIMIT` 时 `rows ÷ total_rows`，否则 `bytes_read ÷ total_bytes`，都无则 `NULL` |
+| `bytes_per_second`、`rows_per_second` | 自装载开始至今的平均速率 |
+| `eta_seconds` | 剩余量 ÷ 速率，百分比未知时为 `NULL` |
+| `interval_ms` | 发布间隔 |
 
 注意事项：
 
-- 进度是 `NOTICE`，受 `client_min_messages` 控制；把它设成 `warning` 及以上就看不到。同样的文本
-  会追加到 `LOGFILE`，后台装载可以事后查看。
-- 百分比基于字节，单调不减。收尾行之前最多停在 `99.9%`：reader 可能已读完而 leader 还在插行，
-  中途出现 `100.0%` 只会让人误以为卡住。
-- 开销是每插入一行一次整数比较（每 512 行才取一次时钟），1 GiB 基线上低于 0.1%；额外的 I/O
-  只有收尾行与 `LOGFILE` 副本。
-- 因被拒记录而中止的装载（见 [§11](#11-错误处理与-badfile)）不会打印收尾行，因为它并没有"完成"。
+- **每个装载默认都发布进度。** 每个运行中的装载对应一个小文件
+  `$PGDATA/pg_fastload/progress/<pid>.status`，最多每 `PROGRESS_INTERVAL` 毫秒原子替换一次
+  （`.tmp` + rename）。视图只是枚举这个目录、并删掉后端已消失的记录，因此它是集群级的：
+  在 `tpcc` 里发起的装载，从 `postgres` 或同实例任何其它数据库都看得到。
+- **装载会话不打印任何东西**，输出保持干净。若还想要原来的客户端进度流（或想在 `LOGFILE`
+  里留一份，便于事后查看），加上 `PROGRESS_NOTICE=ON`：
+
+  ```
+  NOTICE:  pg_fastload progress: start, input 1024.0 MiB, interval 1000 ms
+  NOTICE:  pg_fastload progress: 50.0% | rows 3,687,521 | 512.0 MiB / 1024.0 MiB | 136.4 MiB/s | 982.0k rows/s | elapsed 00:00:03 | ETA 00:00:03
+  NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1024.0 MiB / 1024.0 MiB | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+  ```
+
+  `NOTICE` 受 `client_min_messages` 控制，设成 `warning` 及以上就看不到；视图与 `LOGFILE` 不受影响。
+- **`PROGRESS=OFF` 完全不发布**：视图对该装载始终为空，`$PGDATA/pg_fastload/progress/` 下也不写
+  任何文件。`PROGRESS_INTERVAL` 只调整已发布记录的节奏；单独指定它本身就表示要看进度，因此会
+  顺带打开发布。
+- **百分比单调不减。** 装载结束前最多停在 `99.9%`：reader 可能已读到文件末尾而 leader 还在插行，
+  中途出现 `100.0%` 只会让人误以为卡住。若更关心行数而不是字节数，用 `LIMIT`，它会把百分比
+  切成 `rows ÷ LIMIT` —— 这正是调用方真正想要的进度。
+- **结束与失败都可见。** 装载完成会删掉自己的记录，视图回到 `0 行`；因被拒记录而中止、或被
+  cancel 的装载同样如此。被 `SIGKILL` 杀死的后端无法清理，它的记录会以 `state = 'stale'` 被
+  报告一次，随即由下一个读取者（或下一次装载启动时的清理）删除。
+- **开销**：热路径每插入一行一次整数比较；每 512 行取一次时钟，文件最多每个间隔写一次。
+  3M 行串行装载上的实测开销低于跑动噪声（±2%）；1 KiB 状态文件、无 `fsync`，它不是数据。
+- **权限**：这些行会暴露数据库名、表名与输入文件路径，因此
+  `pgfastload.fl_progress_rows()` 的 `EXECUTE` 已从 `PUBLIC` 收回（视图以属主身份执行）。需要
+  给监控角色授权时，授权视图而不是放开函数：
+
+  ```sql
+  GRANT SELECT ON pgfastload.pg_fastload_progress TO monitor;
+  ```
+- 因被拒记录而中止的装载（见 [§11](#11-错误处理与-badfile)）不会报告收尾行，因为它并没有"完成"。
 
 ---
 

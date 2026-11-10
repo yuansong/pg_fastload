@@ -22,3 +22,49 @@ CREATE FUNCTION pgfastload.pg_fastload(
 	OUT duration float8
 )
 AS 'MODULE_PATHNAME', 'pg_fastload' LANGUAGE C VOLATILE STRICT;
+
+/*
+ * Load progress.
+ *
+ * A pg_fastload() call occupies its session until it returns, so progress is
+ * published rather than printed: the loading backend keeps one status record
+ * per running load and every session reads it through the view below.
+ *
+ *     SELECT * FROM pgfastload.pg_fastload_progress;
+ *
+ * The set-returning function is the implementation; the view is the API.
+ * EXECUTE is revoked from PUBLIC because the rows expose database, table and
+ * input file names: grant SELECT on the view to a monitoring role instead.
+ */
+CREATE FUNCTION pgfastload.fl_progress_rows(
+	OUT pid integer,
+	OUT backend_start timestamp with time zone,
+	OUT started timestamp with time zone,
+	OUT datname name,
+	OUT relname text,
+	OUT infile text,
+	OUT input_type text,
+	OUT mode text,
+	OUT state text,
+	OUT elapsed_seconds double precision,
+	OUT rows bigint,
+	OUT bytes_read bigint,
+	OUT total_bytes bigint,
+	OUT total_rows bigint,
+	OUT percent double precision,
+	OUT bytes_per_second double precision,
+	OUT rows_per_second double precision,
+	OUT eta_seconds double precision,
+	OUT interval_ms integer
+)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_fastload_progress'
+LANGUAGE C VOLATILE;
+
+REVOKE ALL ON FUNCTION pgfastload.fl_progress_rows() FROM PUBLIC;
+
+CREATE VIEW pgfastload.pg_fastload_progress AS
+	SELECT * FROM pgfastload.fl_progress_rows();
+
+COMMENT ON VIEW pgfastload.pg_fastload_progress IS
+	'Load progress of pg_fastload() calls currently running in this cluster';

@@ -160,6 +160,16 @@ The figures in this section are all measured or estimated from profile data.
 | Cost | I/O ×N + N duplicate boundary scans: 2.82× for 32M rows under warm cache, **reverses to 0.15× under cold cache (6.49× slower)** |
 | Conclusion | Rejected, replaced by single-reader, multi-worker. The first version's record-boundary state machine, SKIP/LIMIT window semantics, degradation list, and race-tolerance design are all inherited by the single-reader, multi-worker architecture |
 
+### 8.6 Progress through the loading session's own `NOTICE` stream
+
+| Item | Content |
+|---|---|
+| Idea | Report progress with `NOTICE` messages (`PROGRESS=ON`) plus a copy in `LOGFILE` |
+| Implementation cost | Very low: a formatting helper and a cadence check in the insert loop |
+| Why it was insufficient | It reports to the **wrong place**: the loading session is the busy one, and its client is blocked inside the statement, so the person who needs the number cannot see it. Cross-session visibility (another psql window, a monitoring agent, `pg_stat_activity`-style polling) is the actual requirement, and a `NOTICE` also disappears above `client_min_messages = warning` |
+| Conclusion | Rejected as the primary mechanism, **kept as an option**: progress is published to `$PGDATA/pg_fastload/progress/<pid>.status` and read through `pgfastload.pg_fastload_progress`; `PROGRESS_NOTICE=ON` still streams the `NOTICE` form for people who want it in the client or in `LOGFILE` |
+| Alternatives considered | `dsm_registry` (`GetNamedDSMSegment`) — only exists from PG 17, while this tree supports 15+; SysV shared memory — would force `shared_preload_libraries` on every deployment; a background worker that samples `pg_stat_activity` — cannot see per-load byte counters |
+
 ---
 
 *Related documents: [Changes](CHANGES.md) · [Verification report](VERIFICATION.md) · [Benchmarks](BENCHMARK.md) · [Architecture](ARCHITECTURE.md)*

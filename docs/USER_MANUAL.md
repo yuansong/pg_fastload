@@ -346,14 +346,15 @@ reason fixed-length loading is several times faster than CSV.
 | `PARALLEL` | `ON` / `OFF` | `OFF` | enable the multi-process parallel load |
 | `PARALLEL_WORKERS` | `1`..`64` | online CPUs − 1 (≥ 1) | number of parser workers; `≤ 1` falls back to serial |
 
-### 6.9 Progress reporting (new in pg_fastload)
+### 6.9 Progress (new in pg_fastload)
 
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
-| `PROGRESS` | `ON` / `OFF` | `OFF` | emit a one-line progress report while the load runs |
-| `PROGRESS_INTERVAL` | `100`..`3600000` (ms) | `1000` | minimum gap between two reports; **specifying it implies `PROGRESS=ON`** |
+| `PROGRESS` | `ON` / `OFF` | `ON` | publish a status record for this load, readable by every session through `pgfastload.pg_fastload_progress` |
+| `PROGRESS_INTERVAL` | `100`..`3600000` (ms) | `1000` | minimum gap between two published records; **specifying it implies `PROGRESS=ON`** |
+| `PROGRESS_NOTICE` | `ON` / `OFF` | `OFF` | additionally stream a `NOTICE` line to the loading client (and `LOGFILE`) |
 
-See [§12.4](#124-load-progress) for the output format and cost.
+See [§12.4](#124-load-progress) for the view, its columns and the cost.
 
 ---
 
@@ -607,47 +608,89 @@ During a parallel load you should see one reader plus N workers.
 ### 12.4 Load progress
 
 A `pg_fastload()` call is one SQL statement, so without help it stays silent until it returns —
-uncomfortable when a 100 GB load runs for half an hour. `PROGRESS=ON` prints a snapshot at a fixed
-cadence:
+uncomfortable when a 100 GB load runs for half an hour. Asking the loading session to *print*
+progress does not help either: that session is the busy one, and its client is blocked on a
+statement that has not finished. Progress therefore has to be **published**, and read from
+somewhere else:
 
 ```sql
+-- session 1, busy for the next 30 minutes
 SELECT * FROM pgfastload.pg_fastload(ARRAY[
   'INPUT=/data/lineitem.csv',
   'OUTPUT=public.lineitem',
-  'PARALLEL=ON',
-  'PROGRESS=ON',
-  'PROGRESS_INTERVAL=1000'   -- ms; default 1000
+  'PARALLEL=ON'
 ]);
+
+-- session 2, or a monitoring agent, or another database of the same cluster
+SELECT * FROM pgfastload.pg_fastload_progress;
 ```
 
 ```
-NOTICE:  pg_fastload progress: start, input 1024.0 MiB, interval 1000 ms
-NOTICE:  pg_fastload progress: 12.6% (129.0 MiB / 1024.0 MiB) | rows 927,744 | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
-NOTICE:  pg_fastload progress: 50.0% (512.0 MiB / 1024.0 MiB) | rows 3,687,521 | 136.4 MiB/s | 982.0k rows/s | elapsed 00:00:03 | ETA 00:00:03
-NOTICE:  pg_fastload progress: 100.0% (1024.0 MiB / 1024.0 MiB) | rows 7,375,042 | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+ pid  | datname |    relname      | input_type |  mode    | state   | elapsed_seconds |  rows   | bytes_read | total_bytes
+------+---------+-----------------+------------+----------+---------+-----------------+---------+------------+-------------
+ 4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 | 1073741824
 ```
 
-| Field | Meaning |
+| Column | Meaning |
 |---|---|
-| percentage | input bytes consumed ÷ input size. Falls back to *rows ÷ `LIMIT`* when the input size is unknown, and is omitted entirely for STDIN / pipes |
+| `pid` | backend running the load |
+| `backend_start`, `started` | session start / load start |
+| `datname`, `relname`, `infile` | database, target table, input given to `INPUT` |
+| `input_type`, `mode` | resolved `TYPE` (`CSV`, `BINARY`, `FIXED`, …) and `serial` / `parallel` |
+| `state` | `running` while the backend is alive, `stale` for a record left by a killed backend |
+| `elapsed_seconds` | since `started` |
 | `rows` | rows the leader has inserted — the number the statement will report |
-| `read` | bytes the reader has consumed (serial: the parser; parallel: the single reader process) |
-| `…/s` | average byte and row rate since the statement started |
-| `ETA` | remaining bytes ÷ average byte rate (only with a known percentage) |
-| `\| done` | the closing line, always emitted once, even when the load is shorter than one interval |
+| `bytes_read`, `total_bytes` | bytes consumed by the reader / size of the input file (`0` when unknown: STDIN, pipe) |
+| `total_rows` | `LIMIT`, `0` when unlimited |
+| `percent` | `rows ÷ total_rows` when `LIMIT` is finite, else `bytes_read ÷ total_bytes`, else `NULL` |
+| `bytes_per_second`, `rows_per_second` | averages since the load started |
+| `eta_seconds` | remaining work ÷ rate, `NULL` when the percentage is unknown |
+| `interval_ms` | publishing cadence |
 
 Notes:
 
-- The report is a `NOTICE`, so it obeys `client_min_messages`; it does not appear if you set that
-  to `warning` or above. The same text is appended to `LOGFILE`, which is how a background load is
-  watched afterwards.
-- The percentage is byte-based and never regresses. It stops at `99.9%` until the closing line: the
-  reader can be at EOF while the leader still has rows to insert, and a mid-load `100.0%` only reads
-  as a stall.
-- Cost is one integer comparison per inserted row (the clock is sampled once every 512 rows), below
-  0.1% on the 1 GiB baseline; the closing line and the `LOGFILE` copy are the only extra I/O.
-- A load that aborts on a rejected record (see [§11](#11-error-handling-and-badfiles)) prints no
-  closing line, because it is not done.
+- **Every load publishes by default.** The record is one small file per running load,
+  `$PGDATA/pg_fastload/progress/<pid>.status`, rewritten atomically (`.tmp` + rename) at most once
+  per `PROGRESS_INTERVAL`. The view simply lists that directory and deletes records whose backend is
+  gone, so it is cluster-wide: a load started in `tpcc` is visible from `postgres`, and from any
+  other database of the same instance.
+- **Nothing is printed** to the loading session, which keeps its output clean. If you also want the
+  old client-side stream (or a copy in `LOGFILE` for a load you started hours ago), add
+  `PROGRESS_NOTICE=ON`:
+
+  ```
+  NOTICE:  pg_fastload progress: start, input 1024.0 MiB, interval 1000 ms
+  NOTICE:  pg_fastload progress: 50.0% | rows 3,687,521 | 512.0 MiB / 1024.0 MiB | 136.4 MiB/s | 982.0k rows/s | elapsed 00:00:03 | ETA 00:00:03
+  NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1024.0 MiB / 1024.0 MiB | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+  ```
+
+  `NOTICE` obeys `client_min_messages`, so it disappears at `warning` and above; the view and
+  `LOGFILE` do not.
+- **`PROGRESS=OFF` publishes nothing** for that load: the view stays empty, and nothing is written
+  under `$PGDATA/pg_fastload/progress/`. `PROGRESS_INTERVAL` only tunes the cadence of an already
+  published record; specifying it on its own is still a request for progress and turns publishing
+  on.
+- **The percentage never regresses.** It stops at `99.9%` until the load is done: the reader can be
+  at EOF while the leader still has rows to insert, and a mid-load `100.0%` only reads as a stall.
+  Where the row count matters more than the byte count, use `LIMIT`, which switches the percentage
+  to `rows ÷ LIMIT` — that is what the caller actually asked for.
+- **Ends and failures are visible.** A finished load removes its record, so the view goes back to
+  `0 rows`; so does a load that aborts on a rejected record or is cancelled. A backend killed with
+  `SIGKILL` cannot clean up, and its record is reported once as `state = 'stale'` and then deleted
+  by the next reader (or by the next load's startup purge).
+- **Cost**: one integer comparison per inserted row in the hot loop; the clock is sampled once every
+  512 rows and the file is written at most once per interval. Measured overhead on a 3 M-row serial
+  load is below the run-to-run noise (±2%); a 1 KiB status file with no `fsync` is not data.
+- **Permissions**: the rows expose database, table and input file names, so `EXECUTE` on
+  `pgfastload.fl_progress_rows()` is revoked from `PUBLIC` (the view is the owner's). Grant the view
+  to a monitoring role instead of widening the function:
+
+  ```sql
+  GRANT SELECT ON pgfastload.pg_fastload_progress TO monitor;
+  ```
+- A load that aborts on a rejected record (see [§11](#11-error-handling-and-badfiles)) never reports
+  a closing line, because it is not done.
+
 
 ---
 

@@ -344,48 +344,79 @@ CRLF、裸 CR、空行、缺列/多列、未闭合引号、类型转换失败、
 
 ---
 
-## 18. 装载进度显示（2026-11-10）
+## 18. 装载进度：`pg_fastload_progress` 视图（2026-11-10）
 
-`pg_fastload()` 是一次 SQL 调用，大文件跑几分钟也看不到任何输出。新增两个关键字解决这个问题：
+`pg_fastload()` 是一次 SQL 调用，大文件跑几分钟也看不到任何输出。而让装载会话自己"打印"进度也
+解决不了问题：忙的正是那个会话，它的客户端被一条尚未结束的语句阻塞着。因此进度改为**发布**出来，
+从别处读取：
+
+```sql
+-- 会话 1：接下来半小时都很忙
+SELECT * FROM pgfastload.pg_fastload(ARRAY[
+  'INPUT=/data/lineitem.csv', 'OUTPUT=public.lineitem', 'PARALLEL=ON']);
+
+-- 会话 2、监控采集程序，或同实例的另一个数据库
+SELECT * FROM pgfastload.pg_fastload_progress;
+```
+
+```
+ pid  | datname |    relname      | input_type |  mode    | state   | elapsed_seconds |  rows   | bytes_read | total_bytes
+------+---------+-----------------+------------+----------+---------+-----------------+---------+------------+-------------
+ 4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 |  1073741824
+```
+
+视图共 19 列：`pid`、`backend_start`、`started`、`datname`、`relname`、`infile`、`input_type`、
+`mode`、`state`、`elapsed_seconds`、`rows`、`bytes_read`、`total_bytes`、`total_rows`、`percent`、
+`bytes_per_second`、`rows_per_second`、`eta_seconds`、`interval_ms`。
 
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
-| `PROGRESS` | `ON` / `OFF` | `OFF` | 按固定间隔输出一行进度 |
-| `PROGRESS_INTERVAL` | `100`..`3600000` 毫秒 | `1000` | 两行之间的最小间隔；**指定即等价于 `PROGRESS=ON`** |
+| `PROGRESS` | `ON` / `OFF` | `ON` | 为本次装载发布状态记录 |
+| `PROGRESS_INTERVAL` | `100`..`3600000` 毫秒 | `1000` | 两条记录之间的最小间隔；**指定即等价于 `PROGRESS=ON`** |
+| `PROGRESS_NOTICE` | `ON` / `OFF` | `OFF` | 额外向装载客户端与 `LOGFILE` 输出 `NOTICE` 进度行 |
 
 ```
-NOTICE:  pg_fastload progress: start, input 1.00 GiB, interval 200 ms
+NOTICE:  pg_fastload progress: start, input 1.00 GiB, interval 1000 ms
 NOTICE:  pg_fastload progress: 12.6% | rows 927,744 | 129.0 MiB / 1.00 GiB | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
 NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 149.0 MiB/s | 1.07M rows/s | elapsed 00:00:06 | done
 ```
 
 | 文件 | 改动 |
 |---|---|
-| `include/progress.h`、`lib/progress.c` | 新模块：单位格式化（字节/速率/`hh:mm:ss`/千分位）、间隔节流、`NOTICE` + `LOGFILE` 双写 |
-| `include/reader.h` | `Parser.bytes_read`（百分比来源）；`Reader.progress` / `progress_interval` |
-| `lib/reader.c` | 新增 `PROGRESS` / `PROGRESS_INTERVAL` 参数解析与范围校验，并写入装载日志 |
-| `lib/parser_csv.c`、`lib/parser_binary.c` | 每次 `SourceRead()` 累加 `bytes_read`（含被 SKIP 掉的记录，百分比因此覆盖 SKIP 段） |
-| `lib/pg_fastload.c` | 日志就绪后 `ProgressInit()`；串行循环内 `ProgressUpdate()` / `ProgressFinish()` |
-| `include/fastload_parallel.h` | `FastloadShared.bytes_read`，由 reader 进程发布 |
-| `lib/fastload_worker.c` | CSV 与定长两条 reader 路径每次 `read()` 后 `fl_publish_bytes()`（每 1 MiB 一次 spinlock） |
-| `lib/fastload_parallel.c` | leader 每插入 1024 行采样一次 `bytes_read` 并 `ProgressUpdate()`；即将中止的装载不打印收尾行 |
+| `include/progress.h`、`lib/progress.c` | 重写：原子替换的状态记录（`$PGDATA/pg_fastload/progress/<pid>.status`）、按 pid 存活状态清理陈旧记录、把记录变成行的 `pg_fastload_progress()` SRF |
+| `lib/pg_fastload.sql.in` | `pgfastload.fl_progress_rows()`（19 个 OUT 列，`RETURNS SETOF record`，`EXECUTE` 从 `PUBLIC` 收回）与 `pgfastload.pg_fastload_progress` 视图 |
+| `lib/exports.txt` | `pg_fastload_progress`、`pg_finfo_pg_fastload_progress` |
+| `include/reader.h`、`lib/reader.c` | `PROGRESS` 默认改为 `ON`；新增 `PROGRESS_NOTICE`；保留 `Reader.type` 供记录使用；三者都写入装载日志 |
+| `lib/pg_fastload.c` | 组装一份 `ProgressInfo`（库、表、`TYPE`、`serial`/`parallel`）；错误路径上 `ProgressAbort()` |
+| `lib/fastload_parallel.c` | 除注释外无改动：仍由 leader 发布，每 1024 行采样一次 reader 的字节计数 |
+| `util/fl_progress_test.py` | 验收脚本重写：一个连接发起装载，另一个连接轮询视图 |
 
 设计要点：
 
-- **百分比来源**：给了 `LIMIT` 就按 `行数 / LIMIT`（请求的行到齐即算完成，即使 reader 故意提前停）；
-  否则按 `已读字节 / 文件大小`；两者都没有（STDIN、管道）则不显示百分比。
-- **单调不减、不说谎**：周期行最高 `99.9%`，`100.0%` 只属于收尾行——reader 可能已到 EOF 而 leader
-  还在插最后几行。
-- **开销**：每插入一行一次整数比较，每 512 行才取一次时钟。1 GiB 串行基线实测：不开 6 922 ms、
-  开 6 917 ms（三次交错运行中位数，−0.07%，即噪声范围内）。
-- **中止不打收尾行**：因解析错误契约（第 17 节）停下的装载不算"完成"。
+- **用状态文件而不是共享内存**：PG 直到 17 才有命名 DSM 注册表（`GetNamedDSMSegment`），而本代码树
+  支持 15 及以上；改用普通 SysV 共享内存又会让每个部署都被迫打开 `shared_preload_libraries`。文件
+  两样都不需要，且是集群级的（在 `tpcc` 里发起的装载，从 `postgres` 也看得到），还能安全降级：
+  后端被 kill 后留下的记录仍可读，只是 pid 不再存活。
+- **原子替换**：每次刷新先写 `<pid>.tmp` 再 `rename()` 覆盖 `<pid>.status`，读取方永远看不到写了一半
+  的行；发布失败只关闭本次装载的发布并记一行日志，绝不会让装载失败。
+- **百分比来源**：给了 `LIMIT` 就按 `rows / LIMIT`（请求的行到齐即算完成，即使 reader 故意提前停）；
+  否则按 `bytes_read / 文件大小`；两者都没有（STDIN、管道）则 `percent` 为 `NULL`，字节／行速率照常。
+- **单调不减、不说谎**：记录的百分比由单调计数器算出；`NOTICE` 流额外把周期行封顶 `99.9%`，因为
+  reader 可能已到 EOF 而 leader 还在插最后几行。
+- **结束与失败**：`ProgressFinish()` 删除记录（视图回到 `0 行`）；错误路径上的 `ProgressAbort()`
+  同样删除但不打收尾行——因解析错误契约（第 17 节）停下的装载不算"完成"。被 `SIGKILL` 的后端
+  记录会以 `state = 'stale'` 被报告一次，随后由下一个读取者删除。
+- **开销**：每插入一行一次整数比较；每 512 行取一次时钟；约 1 KiB 的记录、无 `fsync`，最多每个间隔
+  重写一次。3M 行串行装载实测在跑动噪声内（±2%）。
 
-验证（`_t_progress.py`，PG 18.6，15 个用例）：默认与 `PROGRESS=OFF` 零输出；只给
-`PROGRESS_INTERVAL` 也能开启；串行 1 GiB 在 200 ms 间隔下输出 36 行；`PARALLEL=ON` w=4 输出 10 行、
-auto 输出 3 行；`LIMIT=1000000` 百分比切换为 `of 1,000,000 rows`；定长 100 MiB 输出 3 行；
-`PROGRESS_INTERVAL=50` 报错 `PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds`；
-每例收尾行的行数与函数返回值完全一致；百分比单调且不超过 100。CSV 90/90、定长 44/44 与多版本
-验收均不受影响。
+验证（`util/fl_progress_test.py`，随扩展交付；PG 15.19 / 16.15 / 17.11 / 18.6 / 19rc1 各 8 项）：
+视图能看到运行中的装载，数据库、表、`TYPE`、模式、间隔均正确，结束后回到空；`PARALLEL=ON` 报告
+`mode = parallel`；`LIMIT` 把 `percent` 切成 `rows / LIMIT` 且 `total_rows` 有值；`PROGRESS=OFF`
+全程不发布；只给 `PROGRESS_INTERVAL` 也能开启；`PROGRESS_NOTICE=ON` 追加 NOTICE 流，收尾行带
+`100.0%` 与精确行数；`PROGRESS_INTERVAL=50` 报错
+`PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds`；行数与百分比单调且落在 `0..100`。
+1 GiB 装载的跨会话轮询（`_t_view.py`）显示：不在装载的那个会话里，行数从 1.1M 一路涨到 6.5M。
+CSV 90/90、定长 44/44 与多版本验收均不受影响。
 
 ---
 

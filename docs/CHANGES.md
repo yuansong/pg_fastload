@@ -375,52 +375,88 @@ covered by functional acceptance and serial-vs-parallel self-consistency only.
 
 ---
 
-## 18. Load Progress Reporting (2026-11-10)
+## 18. Load progress: the `pg_fastload_progress` view (2026-11-10)
 
 `pg_fastload()` is a single SQL statement, so a multi-minute load over a large file produced no output
-at all until it returned. Two new keywords fix that:
+at all until it returned — and asking that same session to print progress does not help, because it is
+the busy one: its client is blocked on a statement that has not finished yet. Progress is therefore
+**published**, and read from elsewhere:
+
+```sql
+-- session 1: busy for the next half hour
+SELECT * FROM pgfastload.pg_fastload(ARRAY[
+  'INPUT=/data/lineitem.csv', 'OUTPUT=public.lineitem', 'PARALLEL=ON']);
+
+-- session 2, a monitoring agent, or any other database of the same instance
+SELECT * FROM pgfastload.pg_fastload_progress;
+```
+
+```
+ pid  | datname |    relname      | input_type |  mode    | state   | elapsed_seconds |  rows   | bytes_read | total_bytes
+------+---------+-----------------+------------+----------+---------+-----------------+---------+------------+-------------
+ 4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 |  1073741824
+```
+
+The view has 19 columns: `pid`, `backend_start`, `started`, `datname`, `relname`, `infile`,
+`input_type`, `mode`, `state`, `elapsed_seconds`, `rows`, `bytes_read`, `total_bytes`, `total_rows`,
+`percent`, `bytes_per_second`, `rows_per_second`, `eta_seconds`, `interval_ms`.
 
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
-| `PROGRESS` | `ON` / `OFF` | `OFF` | emit a one-line report at a fixed cadence |
-| `PROGRESS_INTERVAL` | `100`..`3600000` ms | `1000` | minimum gap between two reports; **implies `PROGRESS=ON`** |
+| `PROGRESS` | `ON` / `OFF` | `ON` | publish a status record for this load |
+| `PROGRESS_INTERVAL` | `100`..`3600000` ms | `1000` | minimum gap between two records; **implies `PROGRESS=ON`** |
+| `PROGRESS_NOTICE` | `ON` / `OFF` | `OFF` | also stream a `NOTICE` line to the loading client and `LOGFILE` |
 
 ```
-NOTICE:  pg_fastload progress: start, input 1.00 GiB, interval 200 ms
+NOTICE:  pg_fastload progress: start, input 1.00 GiB, interval 1000 ms
 NOTICE:  pg_fastload progress: 12.6% | rows 927,744 | 129.0 MiB / 1.00 GiB | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
 NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 149.0 MiB/s | 1.07M rows/s | elapsed 00:00:06 | done
 ```
 
 | File | Change |
-|---|---|---|
-| `include/progress.h`, `lib/progress.c` | new module: formatting (bytes / rates / `hh:mm:ss` / thousands separators), cadence throttling, `NOTICE` + `LOGFILE` emission |
-| `include/reader.h` | `Parser.bytes_read` (drives the percentage); `Reader.progress` / `progress_interval` |
-| `lib/reader.c` | `PROGRESS` / `PROGRESS_INTERVAL` keywords with range validation; both dumped to the log |
-| `lib/parser_csv.c`, `lib/parser_binary.c` | accumulate `bytes_read` at every `SourceRead()` (skipped records included, so the percentage covers `SKIP`) |
-| `lib/pg_fastload.c` | `ProgressInit()` after the logger exists; `ProgressUpdate()` / `ProgressFinish()` in the serial loop |
-| `include/fastload_parallel.h` | `FastloadShared.bytes_read`, published by the reader |
-| `lib/fastload_worker.c` | `fl_publish_bytes()` at every read() in both the CSV and the fixed-length reader (spinlock once per 1 MiB) |
-| `lib/fastload_parallel.c` | leader samples `bytes_read` every 1024 inserted rows and calls `ProgressUpdate()`; closing line skipped when the load is about to abort |
+|---|---|
+| `include/progress.h`, `lib/progress.c` | rewritten: atomically replaced status records (`$PGDATA/pg_fastload/progress/<pid>.status`), stale-record purge by pid liveness, and the `pg_fastload_progress()` SRF that turns records into rows |
+| `lib/pg_fastload.sql.in` | `pgfastload.fl_progress_rows()` (19 OUT columns, `RETURNS SETOF record`, `EXECUTE` revoked from `PUBLIC`) and the `pgfastload.pg_fastload_progress` view |
+| `lib/exports.txt` | `pg_fastload_progress`, `pg_finfo_pg_fastload_progress` |
+| `include/reader.h`, `lib/reader.c` | `PROGRESS` now defaults to `ON`; new `PROGRESS_NOTICE`; `Reader.type` kept for the record; all three dumped to the log |
+| `lib/pg_fastload.c` | builds one `ProgressInfo` (database, table, `TYPE`, `serial`/`parallel`); `ProgressInit()` / `ProgressAbort()` on the error path |
+| `lib/fastload_parallel.c` | unchanged apart from comments: the leader publishes, sampling the reader's byte counter every 1024 rows |
+| `util/fl_progress_test.py` | rewritten acceptance harness: starts a load in one connection and polls the view from another |
 
 Design notes:
 
-- **Percentage source.** `LIMIT` given → `rows / LIMIT` (the job is complete when the requested rows are
-  in, even though the reader deliberately stops early). Otherwise `bytes_read / file size`. Neither
-  known (STDIN, pipe) → no percentage at all.
-- **Never regresses, never lies.** The periodic lines cap at `99.9%`; `100.0%` belongs to the closing
-  line only, because the reader can be at EOF while the leader still has rows to insert.
-- **Cost.** One integer comparison per inserted row — the clock is sampled once every 512 rows. Measured
-  on the 1 GiB serial baseline: 6 922 ms without, 6 917 ms with (median of three interleaved runs,
-  −0.07%, i.e. inside the noise).
-- **No closing line on abort.** A load stopped by the parse-error contract (section 17) is not "done".
+- **A status file, not shared memory.** PostgreSQL only grew a named-DSM registry
+  (`GetNamedDSMSegment`) in 17, while this tree supports 15 and later; plain SysV shared memory would
+  force `shared_preload_libraries` on every deployment. A file needs neither, is cluster-wide (a load
+  started in `tpcc` is visible from `postgres`), and degrades safely: a killed backend leaves a
+  readable record whose pid is simply no longer alive.
+- **Atomic replacement.** Each tick writes `<pid>.tmp` and `rename()`s it over `<pid>.status`, so a
+  reader never sees a half-written line; a failed publish only disables publishing for that load and
+  logs one line — it can never fail the load.
+- **Percentage source.** `LIMIT` given → `rows / LIMIT` (the job is complete when the requested rows
+  are in, even though the reader deliberately stops early). Otherwise `bytes_read / file size`.
+  Neither known (STDIN, pipe) → `percent` is `NULL`, and the byte/row rates still work.
+- **Never regresses, never lies.** A record's percentage is computed from monotonic counters; the
+  `NOTICE` stream additionally caps the periodic lines at `99.9%`, because the reader can be at EOF
+  while the leader still has rows to insert.
+- **Ends and failures.** `ProgressFinish()` deletes the record (the view returns to `0 rows`);
+  `ProgressAbort()` does the same on the error path without a closing line, because a load stopped by
+  the parse-error contract (section 17) is not "done". A `SIGKILL`ed backend is reported once as
+  `state = 'stale'` and deleted by the next reader.
+- **Cost.** One integer comparison per inserted row — the clock is sampled once every 512 rows, and
+  the record (about 1 KiB, no `fsync`) is rewritten at most once per interval. Measured on a 3 M-row
+  serial load: inside the run-to-run noise (±2%).
 
-Verification (`_t_progress.py`, PG 18.6, 15 cases): option off by default and with `PROGRESS=OFF` → zero
-lines; `PROGRESS_INTERVAL` alone enables reporting; serial 1 GiB → 36 reports at 200 ms; `PARALLEL=ON`
-w=4 → 10 reports, auto → 3; `LIMIT=1000000` → percentage switches to `of 1,000,000 rows`; fixed-length
-100 MiB → 3 reports; `PROGRESS_INTERVAL=50` → rejected with
-`PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds`; every closing line reports `100.0%`
-and the exact row count returned by the function; percentages are monotonic and never exceed 100.
-The CSV 90/90 and fixed-length 44/44 suites and the multi-version acceptance are unaffected.
+Verification (`util/fl_progress_test.py`, shipped with the extension; PG 15.19 / 16.15 / 17.11 /
+18.6 / 19rc1, 8 checks each): the view shows the running load with the right database, table, `TYPE`,
+mode and interval and is empty again afterwards; `PARALLEL=ON` reports `mode = parallel`; `LIMIT`
+switches `percent` to `rows / LIMIT` and sets `total_rows`; `PROGRESS=OFF` leaves the view empty for
+the whole load; `PROGRESS_INTERVAL` alone turns publishing on; `PROGRESS_NOTICE=ON` adds the NOTICE
+stream whose closing line carries `100.0%` and the exact row count; `PROGRESS_INTERVAL=50` is
+rejected with `PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds`; rows and percent are
+monotonic and stay inside `0..100`. Cross-session polling of a 1 GiB load (`_t_view.py`) shows the
+row counter climbing from 1.1 M to 6.5 M in a session that is not the loader's. The CSV 90/90 and
+fixed-length 44/44 suites and the multi-version acceptance are unaffected.
 
 ---
 

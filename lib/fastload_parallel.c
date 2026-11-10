@@ -716,7 +716,7 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 					FL_TICK(prof_par_write, tick);
 
 					/*
-					 * PROGRESS=ON.  The reader publishes its byte count in the
+					 * Progress: the reader publishes its byte count in the
 					 * control block; sampling it every 1024 rows keeps the
 					 * spinlock out of the per-row path.
 					 */

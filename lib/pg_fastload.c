@@ -280,6 +280,14 @@ pg_fastload(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
+		/*
+		 * Whether PARALLEL=ON actually takes effect is decided once, here:
+		 * the decision is reported in the progress record (mode=serial /
+		 * parallel) and re-used by the branch below, so that the
+		 * degradation message in FastloadParallelSupported() is logged once.
+		 */
+		volatile bool parallel = false;
+
 		/* create logger */
 		CreateLogger(rd->logfile, wt->verbose, rd->infile[0] == ':');
 
@@ -291,13 +299,28 @@ pg_fastload(PG_FUNCTION_ARGS)
 		WriterDumpParams(wt);
 		LoggerLog(INFO, "\n");
 
+		parallel = FastloadParallelSupported(rd, wt);
+
 		/*
-		 * PROGRESS=ON: publish a snapshot every PROGRESS_INTERVAL ms.  The
-		 * statement otherwise stays silent until it returns, which makes a
-		 * multi-minute load over a large file impossible to watch.
+		 * Publish a status record for this load so that any other session can
+		 * follow it through pgfastload.pg_fastload_progress.  The statement
+		 * itself stays silent unless PROGRESS_NOTICE=ON.
 		 */
-		ProgressInit(rd->infile, rd->progress, rd->progress_interval,
-					 rd->limit);
+		{
+			ProgressInfo	pinfo;
+
+			memset(&pinfo, 0, sizeof(pinfo));
+			pinfo.infile = rd->infile;
+			pinfo.datname = get_database_name(MyDatabaseId);
+			pinfo.relname = get_relation_name(wt->relid);
+			pinfo.type = rd->type;
+			pinfo.mode = parallel ? "parallel" : "serial";
+			pinfo.enabled = rd->progress;
+			pinfo.notice = rd->progress_notice;
+			pinfo.interval_ms = rd->progress_interval;
+			pinfo.limit_rows = rd->limit;
+			ProgressInit(&pinfo);
+		}
 
 		FASTLOAD_PROFILE(&prof_init);
 
@@ -318,7 +341,7 @@ pg_fastload(PG_FUNCTION_ARGS)
 		 * parser (FILTER, FORCE_NOT_NULL, non-CSV TYPE, dropped columns)
 		 * transparently falls back to the original loop below.
 		 */
-		if (FastloadParallelSupported(rd, wt))
+		if (parallel)
 		{
 			/*
 			 * Inner PUSH isolates the writer's own FASTLOAD_PROFILE() calls
@@ -355,7 +378,7 @@ pg_fastload(PG_FUNCTION_ARGS)
 				FASTLOAD_PROFILE_POP();
 				FASTLOAD_PROFILE(&prof_writer);
 
-				/* PROGRESS=ON: one integer compare per row, see progress.c */
+				/* PROGRESS: one integer compare per row, see progress.c */
 				ProgressUpdate(wt->count, rd->parser->bytes_read);
 
 				MemoryContextReset(wt->context);
@@ -364,8 +387,8 @@ pg_fastload(PG_FUNCTION_ARGS)
 
 			/*
 			 * Close the progress stream even when the loop ended on EOF or
-			 * LIMIT before the first interval elapsed, so PROGRESS=ON always
-			 * shows the final row count and byte count.
+			 * LIMIT before the first interval elapsed, so the record always
+			 * ends with the final row count and byte count.
 			 */
 			ProgressFinish(wt->count, rd->parser->bytes_read);
 		}
@@ -397,6 +420,12 @@ pg_fastload(PG_FUNCTION_ARGS)
 		errdata = CopyErrorData();
 		LoggerLog(INFO, "%s\n", errdata->message);
 		FreeErrorData(errdata);
+
+		/*
+		 * The load did not finish: remove its progress record without a
+		 * closing line, so the view never reports an aborted load as running.
+		 */
+		ProgressAbort();
 
 		/* close writer first, and reader second */
 		if (wt)
