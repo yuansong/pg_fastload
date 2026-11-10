@@ -79,6 +79,7 @@ Other sizes, the fixed-length format and cold-cache results: [docs/BENCHMARK.md]
 | Skip spool work on unindexed tables | ✗ | ✓ (`SpoolerInsert()` early return, ~0.28 s/1 GiB) |
 | Per-row error tolerance + badfile | ✓ | ✓ (serial path; the parallel path fails the load instead) |
 | Load progress reporting | ✗ | ✓ (published for every load; read it from any session via `pgfastload.pg_fastload_progress` — see [USER_MANUAL §12.4](docs/USER_MANUAL.md#124-load-progress)) |
+| Table export (CSV / BINARY / FIXED) | ✗ | ✓ (`pgfastload.pg_fastload_export()`; CSV is byte-identical to `COPY ... TO`, see [§4.6](#46-the-other-direction-export-a-table-to-csv--binary--fixed)) |
 | Every original control keyword | ✓ | ✓ (unchanged semantics, incl. `WRITER=PARALLEL`) |
 
 ### 2.3 Usage
@@ -311,6 +312,47 @@ stops publishing altogether. Columns, cost and permissions:
 [USER_MANUAL §12.4](docs/USER_MANUAL.md#124-load-progress).
 
 Full keyword list and return columns: [docs/USER_MANUAL.md](docs/USER_MANUAL.md).
+
+### 4.6 The other direction: export a table to CSV / BINARY / FIXED
+
+A load is "file → table"; an export is "table → file", sharing the same Writer and the same
+`COL`/`OUT_COL` layout description:
+
+```sql
+-- CSV: byte-identical to COPY ... TO ... (FORMAT csv)
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.order_line',
+  'OUTPUT=/tmp/order_line.csv',
+  'TYPE=CSV',
+  'HEADER=ON']);
+
+-- any SELECT, with a row cap
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'QUERY=SELECT ol_w_id, ol_d_id, ol_o_id FROM public.order_line WHERE ol_w_id = 1 ORDER BY 1',
+  'OUTPUT=/tmp/ol_w1.csv',
+  'TYPE=CSV']);
+
+-- fixed-width binary: OUT_COL describes the wire layout, a .ctl is written next to it
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.order_line',
+  'OUTPUT=/tmp/order_line.bin',
+  'TYPE=BINARY',
+  'OUT_COL=INTEGER','OUT_COL=INTEGER','OUT_COL=INTEGER',
+  'OUT_COL=INTEGER','OUT_COL=DOUBLE','OUT_COL=DOUBLE']);
+```
+
+Returns `bigint` (rows written). Points worth knowing:
+
+- `TABLE` is the **source** here and `OUTPUT` is a **file** (the reverse of a load); `QUERY=` can
+  replace `TABLE=`;
+- the target is a server-side absolute path that must not exist yet — nothing is ever overwritten;
+  superuser is required;
+- single-process serial (no `PARALLEL`). 8M rows / 312 MiB from page cache: **0.89 s** against
+  `COPY TO`'s 0.95 s, with `cmp`-identical output;
+- a fixed-width field is padded with spaces, and the loader trims it back with `COL=CHAR(n)` but keeps
+  it with `COL=VARCHAR(n)` — use `CHAR(n)` when you want the round trip (at the cost of losing trailing
+  blanks of the original value). Details and limits:
+  [USER_MANUAL §18](docs/USER_MANUAL.md#18-exporting-table-data-pg_fastload_export).
 
 ---
 

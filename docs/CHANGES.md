@@ -397,9 +397,10 @@ SELECT * FROM pgfastload.pg_fastload_progress;
  4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 |  1073741824
 ```
 
-The view has 19 columns: `pid`, `backend_start`, `started`, `datname`, `relname`, `infile`,
-`input_type`, `mode`, `state`, `elapsed_seconds`, `rows`, `bytes_read`, `total_bytes`, `total_rows`,
-`percent`, `bytes_per_second`, `rows_per_second`, `eta_seconds`, `interval_ms`.
+The view has 20 columns: `pid`, `backend_start`, `started`, `direction` (added in §20,
+`load`/`export`), `datname`, `relname`, `infile`, `input_type`, `mode`, `state`, `elapsed_seconds`,
+`rows`, `bytes_read`, `total_bytes`, `total_rows`, `percent`, `bytes_per_second`,
+`rows_per_second`, `eta_seconds`, `interval_ms`.
 
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
@@ -416,7 +417,7 @@ NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 1
 | File | Change |
 |---|---|
 | `include/progress.h`, `lib/progress.c` | rewritten: atomically replaced status records (`$PGDATA/pg_fastload/progress/<pid>.status`), stale-record purge by pid liveness, and the `pg_fastload_progress()` SRF that turns records into rows |
-| `lib/pg_fastload.sql.in` | `pgfastload.fl_progress_rows()` (19 OUT columns, `RETURNS SETOF record`, `EXECUTE` revoked from `PUBLIC`) and the `pgfastload.pg_fastload_progress` view |
+| `lib/pg_fastload.sql.in` | `pgfastload.fl_progress_rows()` (20 OUT columns, `RETURNS SETOF record`, `EXECUTE` revoked from `PUBLIC`) and the `pgfastload.pg_fastload_progress` view |
 | `lib/exports.txt` | `pg_fastload_progress`, `pg_finfo_pg_fastload_progress` |
 | `include/reader.h`, `lib/reader.c` | `PROGRESS` now defaults to `ON`; new `PROGRESS_NOTICE`; `Reader.type` kept for the record; all three dumped to the log |
 | `lib/pg_fastload.c` | builds one `ProgressInfo` (database, table, `TYPE`, `serial`/`parallel`); `ProgressInit()` / `ProgressAbort()` on the error path |
@@ -489,6 +490,106 @@ progress view exists. Evidence: `compat_master_pg1x.out`.
 The per-major branches were deleted from the local repository and from the remote. `master` is the
 branch to use; the remote's former default `REL_18_STABLE` is a stale pointer that disappears with the
 one-time switch of the default branch to `master` under Settings → Branches.
+
+---
+
+## 20. Export: `pg_fastload_export()` (2026-11-10)
+
+Loading was one-directional: file → table. Producing a file from a table meant falling back to
+`COPY`; upstream does have a `WRITER=BINARY`, but it only serialises *this load's input stream* into a
+fixed-width file — the starting point is still `INPUT=` — so there is no way to begin from a table,
+and no CSV writer existed at all. This section adds the other direction:
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV']);
+-- 7375042
+```
+
+### 20.1 Why "the same Writer + an SPI cursor"
+
+| Decision | Rationale |
+|---|---|
+| Reuse the `Writer` abstraction instead of a second output pipeline | the loader's `COL` descriptor already defines every byte of a fixed-width file; an export describing the same thing with `OUT_COL` gets round-trip capability for free |
+| Scan with `SPI_cursor_open_with_args(NULL, q, ..., read_only=true)` | `TABLE=` and `QUERY=` share one path; the cursor brings the caller's snapshot, privilege checks and row visibility, exactly like a plain `SELECT`; non-`SELECT` statements are refused by the cursor itself |
+| A new `CsvWriter` for CSV | the load side only has `parser_csv.c` (a reader); `COPY`'s quoting rules have to be replicated rule by rule to reach byte equality |
+| `BinaryWriter` for BINARY/FIXED | it is already "write tuples to a file in `COL` layout" — a load uses it for spooling; an export is its second user |
+| 1000 rows per `SPI_cursor_fetch` | amortises the SPI round trip without pinning hundreds of megabytes of wide rows in the SPI context between batches |
+
+Files added or changed:
+
+| File | Content |
+|---|---|
+| `lib/export.c` (new) | `pg_fastload_export()`: two-pass option parsing (resolve `TYPE` first, then hand the rest to that writer), SPI cursor scan, per-row `WriterInsert`, progress publishing, `ProgressAbort` + `WriterClose(onError)` on error |
+| `lib/writer_csv.c` (new) | `CreateCsvWriter()`: `CsvWriterInsert` formats each column through `getTypeOutputInfo` + `OutputFunctionCall`, `csv_put_field()` replicates the five quoting rules of `CopyAttributeOutCSV()`; 4 MiB buffer; `DELIMITER`/`QUOTE`/`ESCAPE`/`NULL`/`HEADER`/`OUTPUT`; the dialect is validated before the file is opened (delimiter must differ from quote and escape, none may be a newline, the `NULL` string may not contain the delimiter or the quote) |
+| `include/export.h` (new) | function declaration |
+| `include/writer.h` | `CreateCsvWriter()`, `BinaryWriterSetSourceDesc()`; `struct Writer` gains `bytes` (bytes produced, for progress) and `sample_output` (origin comment in the sample control file) |
+| `lib/writer_binary.c` | new `BinaryWriterSetSourceDesc()`; `bytes` accounting; the NULL-without-`NULLIF` message becomes actionable (`column N is NULL and OUT_COL gives it no representation` + hint); the sample control file gains `# exported from <table>` |
+| `lib/progress.c`, `include/progress.h` | the status record gains `direction` (`load`/`export`); `total_bytes` is only computed for a load; the view gains `direction` as its 4th column, 20 in total |
+| `lib/pg_fastload.sql.in` | `pgfastload.pg_fastload_export(text[]) RETURNS bigint`; `fl_progress_rows()` gains `OUT direction text` |
+| `lib/exports.txt` | `pg_fastload_export`, `pg_finfo_pg_fastload_export` |
+| `lib/Makefile` | `SRCS` gains `export.c`, `writer_csv.c` |
+| `util/fl_export_test.sh` (new) | the acceptance script: 39 checks, exits non-zero on any failure |
+
+### 20.2 Three problems met on the way
+
+1. **Cursor tuples carry no type OID.** The `BinaryWriter` checker used to take the source type from
+   the tuple header (`HeapTupleHeaderGetTypeId`) — true for a load, where tuples are built from the
+   target `TupleDesc`, false for a cursor. The export failed with `type with OID 0 does not exist`.
+   Fix: `BinaryWriterSetSourceDesc(wt, desc)` hands the result `TupleDesc` over explicitly and
+   switches the checker to `BinaryWriterCheckerTuple`, the only variant that enforces per-column
+   width and range.
+2. **The sample control file must not point at the source table.** Upstream defaults `OUTPUT` to the
+   file name without its extension. Making it the source table looked friendlier; measured,
+   `pg_fastload b.bin.ctl` appended 4 rows back into the source table (`TRUNCATE = NO`), turning it
+   into 8. The sample now keeps `OUTPUT` = file name and records provenance in a
+   `# exported from public.t` comment: a slip now yields `relation "b" does not exist`, not modified
+   data.
+3. **Text columns have no exact round trip in a fixed-width format.** Every field is padded with
+   spaces to its declared width, and the loader's `Read_char` (`COL=CHAR(n)`) trims trailing blanks
+   while `Read_varchar` (`COL=VARCHAR(n)`) keeps them. `'xy'` written into 8 bytes therefore comes
+   back as `'xy      '` with `VARCHAR(8)`, and as `'xy'` with `CHAR(8)` — at the cost of losing
+   trailing blanks that the original value may have had. That is a property of the format, not a
+   defect; it is documented in the manual §18.5 and pinned by two assertions: the same `.bin` file
+   reloaded with `CHAR(8)` yields the source digest, reloaded with `VARCHAR(8)` yields the padded one.
+
+### 20.3 Performance
+
+An export runs single-process serially (the source is a cursor and the target is one file, so there is
+no read amplification to spread), and therefore ignores `PARALLEL`. It is in the same class as
+`COPY TO` and slightly faster, thanks to the 4 MiB buffer and the absence of a per-row
+`DestReceiver`:
+
+| Operation | 8M rows / 312 MiB (page cache, median of 3) | Output |
+|---|---|---|
+| `COPY ... TO ... (FORMAT csv)` | 0.95 s | 326,888,896 B |
+| `pg_fastload_export(TYPE=CSV)` | **0.89 s** | 326,888,896 B (`cmp`-identical) |
+
+### 20.4 Verification
+
+`util/fl_export_test.sh` (shipped, PG 18.6) runs 39 assertions, all passing:
+
+- **CSV is byte-identical to `COPY`**, and the CSV round trip (`SKIP=1` for the header) reproduces
+  the content digest;
+- **dialect**: `DELIMITER=|` + `QUOTE='` + `NULL=\N` export and reload produce the same digest
+  (embedded newlines, embedded delimiter/quote, and a literal `\N` value kept distinct from NULL);
+- **`QUERY=` + `LIMIT=`**: `WHERE`/`ORDER BY` are honoured (first row id=5), `LIMIT=2` writes 2 rows;
+- **empty table** → 0 rows, 0-byte file;
+- **BINARY**: 7 fixed-width columns, 44 B/row × 4 rows = 176 B; a `CHAR(8)` reload matches the source
+  digest; the sample control file records the source and keeps `OUTPUT` = file name; a `VARCHAR(8)`
+  reload keeps the padding (documented behaviour);
+- **FIXED**: a text-only layout (numbers carried in `CHAR(n)`) reloads to the source digest;
+- **`NULLIF`** preserves NULL in a fixed-width record: a 3-row table with NULLs round-trips;
+- **11 rejected inputs**: missing `OUTPUT`, relative path, `BINARY` without `OUT_COL`, `FIXED` with
+  `INTEGER`, `OUT_COL` count mismatch, existing target file, NULL without `NULLIF`, unknown keyword,
+  missing `TABLE`/`QUERY`, non-`SELECT` `QUERY`, `DELIMITER` equal to `QUOTE`;
+- **progress**: while an 8M-row export runs, another session reads
+  `export|running|CSV|serial|...`, and the view is empty afterwards.
+
+Load-side regression: CSV 90/90 and fixed-length 44/44 are unaffected (the export only adds a writer
+and a byte counter; `WriterInsert`/`ReaderNext` paths are untouched).
 
 ---
 

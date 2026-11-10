@@ -25,6 +25,7 @@
 15. [Known limitations](#15-known-limitations)
 16. [Migrating from pg_bulkload](#16-migrating-from-pg_bulkload)
 17. [Upgrade and uninstall](#17-upgrade-and-uninstall)
+18. [Exporting table data (`pg_fastload_export`)](#18-exporting-table-data-pg_fastload_export)
 
 ---
 
@@ -43,6 +44,11 @@
 parallelised; ④ plus all transaction, constraint and error semantics stay where they were.
 `PARALLEL=ON` is therefore a switch you can leave on: whenever the parallel path cannot guarantee
 identical semantics, the load silently falls back to the serial path and logs one INFO line.
+
+The opposite direction has an entry point too: `pgfastload.pg_fastload_export()` writes a table or
+the result of any `SELECT` to a CSV / BINARY / FIXED file, using the same Writer and the same
+`COL`/`OUT_COL` layout description, so an exported fixed-width file loads back unchanged
+(see [§18](#18-exporting-table-data-pg_fastload_export)).
 
 ### When to use it
 
@@ -388,6 +394,22 @@ SELECT pgfastload.pg_fastload(ARRAY['INPUT=/data/b.csv','OUTPUT=public.t','PARAL
 COMMIT;
 ```
 
+Exporting is a second function with the same signature, except that it writes a file rather than a
+table:
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.t',
+  'OUTPUT=/data/t.csv',
+  'TYPE=CSV'
+]);
+-- returns bigint: rows written
+```
+
+Note that `TABLE` is the **source** here (it is the target of a load) and `OUTPUT` is a **file**
+(it is a table name for a load). Full keywords, format details and round-trip semantics are in
+[§18](#18-exporting-table-data-pg_fastload_export).
+
 ---
 
 ## 8. Command line
@@ -636,11 +658,12 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 | `pid` | backend running the load |
 | `backend_start`, `started` | session start / load start |
 | `datname`, `relname`, `infile` | database, target table, input given to `INPUT` |
+| `direction` | `load` or `export`: the same record also covers `pg_fastload_export()` (see [§18](#18-exporting-table-data-pg_fastload_export)) |
 | `input_type`, `mode` | resolved `TYPE` (`CSV`, `BINARY`, `FIXED`, …) and `serial` / `parallel` |
 | `state` | `running` while the backend is alive, `stale` for a record left by a killed backend |
 | `elapsed_seconds` | since `started` |
 | `rows` | rows the leader has inserted — the number the statement will report |
-| `bytes_read`, `total_bytes` | bytes consumed by the reader / size of the input file (`0` when unknown: STDIN, pipe) |
+| `bytes_read`, `total_bytes` | bytes consumed by the reader / size of the input file (`0` when unknown: STDIN, pipe). For an export `bytes_read` counts bytes **written** and `total_bytes` is always `0` |
 | `total_rows` | `LIMIT`, `0` when unlimited |
 | `percent` | `rows ÷ total_rows` when `LIMIT` is finite, else `bytes_read ÷ total_bytes`, else `NULL` |
 | `bytes_per_second`, `rows_per_second` | averages since the load started |
@@ -743,6 +766,9 @@ Notes:
 8. `WRITER=PARALLEL` uses a separate transaction (upstream behaviour) and is not atomic with the caller.
 9. Fully verified only on PostgreSQL 18.6 / x86_64 Linux.
 10. During a parallel load the target table holds an `AccessExclusiveLock`, excluding any concurrent access.
+11. Export ([§18](#18-exporting-table-data-pg_fastload_export)) runs single-process serially; `PARALLEL` has no effect on it.
+12. A fixed-width export pads every field: reloading a text column as `CHAR(n)` loses trailing blanks, as
+    `VARCHAR(n)` keeps the padding — neither is an exact round trip (see [§18.5](#185-round-trip-semantics-read-this-section)).
 
 ---
 
@@ -788,6 +814,183 @@ sudo make USE_PGXS=1 PG_CONFIG=/usr/pgsql-18/bin/pg_config uninstall
 
 Uninstalling leaves historical logs and LSF files under `$PGDATA/pg_fastload/`. If an interrupted
 `DIRECT` load left an LSF file, run `pg_fastload -r` before deleting anything.
+
+---
+
+## 18. Exporting table data (`pg_fastload_export`)
+
+A load is "file → table"; an export is "table → file". Both share the same `Writer` abstraction, so
+the same `OUT_COL` layout describes both the bytes an export produces and the bytes a load expects
+to read — that is where every round-trip claim in this manual comes from.
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV'
+]);
+--  pg_fastload_export
+-- --------------------
+--              7375042
+```
+
+Returns `bigint`: the number of rows written.
+
+### 18.1 Execution model
+
+| Step | Implementation | Note |
+|---|---|---|
+| Fetch rows | `SPI_cursor_open_with_args(..., read_only)` + `SPI_cursor_fetch()`, 1000 rows per batch | goes through the planner; privileges, visibility and snapshot are those of a plain `SELECT` |
+| Format | `CsvWriter` (`lib/writer_csv.c`) or `BinaryWriter` (`lib/writer_binary.c`) | 4 MiB buffer, `fsync` on `close()` |
+| Write | `open()` as the **server**, absolute path required | an existing `OUTPUT` is an error, never overwritten |
+| Concurrency | single process, serial | see 18.7: the source is a cursor and the target is one file, so there is no read amplification to parallelise |
+
+`TABLE=` expands to `SELECT * FROM <table>` internally; use `QUERY=` to filter, sort or project.
+They are mutually exclusive and one is required.
+
+### 18.2 Keywords
+
+| Keyword | Values | Default | Meaning |
+|---|---|---|---|
+| `TABLE=` | relation name | — | source table, alternative to `QUERY=` |
+| `QUERY=` | any `SELECT` | — | read-only cursor; `UPDATE`/`DELETE` are rejected (`cannot open UPDATE query as cursor`) |
+| `OUTPUT=` | absolute path | **required** | output file |
+| `TYPE=` | `CSV` / `BINARY` / `FIXED` | `CSV` | `BINARY`/`FIXED` are fixed-width layouts and need `OUT_COL` |
+| `OUT_COL=` | type declaration, repeatable | — | one per output column, in query order; same syntax as the loader's `COL` |
+| `DELIMITER=` `QUOTE=` `ESCAPE=` `NULL=` `HEADER=` | char / boolean | `,` `"` `"` empty `OFF` | `TYPE=CSV` only, same meaning as `COPY ... (FORMAT csv)` |
+| `LIMIT=` | ≥ 1 | unlimited | stop after this many rows |
+| `LOGFILE=` | absolute path | `<OUTPUT>.log` | export log |
+| `PROGRESS=` | `ON` / `OFF` | `ON` | publish a `direction=export` progress record |
+| `PROGRESS_NOTICE=` | `ON` / `OFF` | `OFF` | additionally emit `NOTICE` progress lines |
+| `PROGRESS_INTERVAL=` | 100..3600000 ms | `1000` | implies `PROGRESS=ON` |
+
+`TYPE` accepts only these three values; `TYPE=TUPLE` / `FUNCTION` are load-side input formats and
+have no meaning for an export.
+
+### 18.3 CSV: byte-identical to `COPY`
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV',
+  'HEADER=ON']);
+```
+
+```
+$ psql -c "\copy public.lineitem TO '/tmp/copy.csv' WITH (FORMAT csv, HEADER)"
+$ cmp /tmp/copy.csv /data/lineitem.csv && echo identical
+identical
+```
+
+The quoting rules replicate `CopyAttributeOutCSV()` one by one: a field is quoted when it contains
+`DELIMITER`, `QUOTE`, `ESCAPE`, `\n` or `\r`, and the quote character is doubled inside; a field
+equal to the `NULL` string is quoted too (otherwise it is indistinguishable from NULL); when the
+`NULL` string is empty, an empty field is quoted (`""` and an empty string are two different
+values). By default NULL is written as an empty field; `NULL=\N` separates the two, exactly like
+`COPY`.
+
+- `HEADER=ON` writes the column names from the result `TupleDesc` (expression columns in `QUERY=`
+  may be named `?column?`).
+- Empty table without `HEADER` → 0-byte file; empty table with `HEADER=ON` → just the header line.
+- Throughput: an 8M-row / 312 MiB table exports in 0.89 s from page cache (`COPY TO` takes 0.95 s,
+  and the outputs are `cmp`-identical). Both are single-process sequential writers; the export is
+  slightly faster because of its 4 MiB buffer and the absence of a per-row `DestReceiver`.
+
+### 18.4 BINARY / FIXED: fixed-width layout and a sample control file
+
+```sql
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.bin',
+  'TYPE=BINARY',
+  'OUT_COL=INTEGER',      -- l_orderkey
+  'OUT_COL=INTEGER',      -- l_partkey
+  'OUT_COL=INTEGER',      -- l_suppkey
+  'OUT_COL=INTEGER',      -- l_linenumber
+  'OUT_COL=DOUBLE',       -- l_quantity
+  'OUT_COL=DOUBLE',       -- l_extendedprice
+  ...]);
+```
+
+| Declaration | Width | Encoding |
+|---|---|---|
+| `SMALLINT` / `INTEGER` / `BIGINT` | 2 / 4 / 8 | native little-endian binary, same as the loader's `COL` |
+| `FLOAT` / `DOUBLE` | 4 / 8 | IEEE 754 |
+| `CHAR(n)` / `VARCHAR(n)` / bare `n` | n | text, right-padded with spaces to n bytes |
+
+`TYPE=FIXED` produces exactly the same bytes as `BINARY`; the difference is in what may be
+**declared**: `FIXED` is the fixed-width text format and accepts only `CHAR(n)` / `VARCHAR(n)`, so
+`OUT_COL=INTEGER` is rejected (`TYPE=FIXED writes text only`). Use `BINARY` for native numeric
+fields.
+
+The export also writes a sample control file at `<OUTPUT>.ctl`, ready to be edited:
+
+```ini
+INPUT = /data/lineitem.bin
+# exported from public.lineitem
+OUTPUT = lineitem
+...
+TYPE = BINARY
+COL = INTEGER (4)
+...
+```
+
+`OUTPUT` is the file name (`lineitem.bin` → `lineitem`), **not** the source table: a sample describes
+a file, and the target table is your decision. Defaulting to the source table would make one careless
+`pg_fastload lineitem.bin.ctl` append the rows back into it. Export and load share the same layout
+code, so a `TYPE=BINARY` sample also loads a text file produced by `TYPE=FIXED` (both use the same
+fixed-length reader).
+
+### 18.5 Round-trip semantics (read this section)
+
+| Case | Result |
+|---|---|
+| numeric / boolean / time columns | `BINARY` round-trips exactly (with matching `OUT_COL` and `COL`) |
+| text column reloaded as `COL=CHAR(n)` | exact, but **trailing blanks of the value are lost** (`CHAR` semantics, `Read_char` trims) |
+| text column reloaded as `COL=VARCHAR(n)` | the padding is **kept**: `'xy'` in an 8-byte field comes back as `'xy      '` (8 chars) |
+| `NULL` | fixed-width formats have no NULL bit; declare `OUT_COL=TYPE NULLIF <pattern>`; a real NULL without `NULLIF` is an error |
+
+The third row is a property of the format, not a defect: a fixed-width field is always full, and the
+`VARCHAR` reader keeps the declared width while the `CHAR` reader trims it. So
+
+- to get "reload exactly what you exported", declare text columns `OUT_COL=CHAR(n)` and reload with
+  `COL=CHAR(n)`;
+- to keep trailing blanks, you need `VARCHAR` plus values that fill the width (`length(v) = n`), or
+  `TYPE=CSV`.
+
+`NULL` handling is explicit: without `NULLIF`, a NULL in the data raises
+`column N is NULL and OUT_COL gives it no representation` instead of silently writing 0 or spaces.
+
+Widths and ranges are checked before writing: `value too long for type character(n)` and unsigned
+overflow raise on the offending row, the statement rolls back, and the partially written file stays
+(the `LOGFILE` names the failing column).
+
+### 18.6 Progress
+
+An export publishes into the same view ([§12.4](#124-load-progress)) with `direction = export`,
+`infile` set to the output file and `bytes_read` counting written bytes. The total is unknown, so
+`percent` and `eta_seconds` are `NULL` while `rows_per_second` and `bytes_per_second` work:
+
+```
+ pid  | datname |    relname     | direction | input_type |  mode  |  state  |  rows   | bytes_read
+------+---------+----------------+-----------+------------+--------+---------+---------+------------
+ 4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
+```
+
+### 18.7 Limitations
+
+1. **Single process, serial.** `PARALLEL` has no effect on an export (no error, no parallelism). For a
+   parallel export, split by partition or key range and run several `COPY` statements concurrently.
+2. **Read-only, but holds a snapshot**: the scan runs under the caller's snapshot, so a long export
+   delays `VACUUM` through `oldest xmin`.
+3. **The output must be a server-side, absolute path that does not exist yet.**
+4. **Superuser required** (same as a load: writing a file is a server-side action).
+5. `TYPE=FIXED` accepts character types only; the number of `OUT_COL` declarations must equal the
+   number of output columns (CSV needs no `OUT_COL`).
+6. `QUERY=` takes a single `SELECT` (no trailing `;`, no `WITH ... INSERT`).
+7. The sample control file's `OUTPUT` is the file name — change it to your target table before
+   reloading. The sample always says `TYPE = BINARY`, which also reads `FIXED` text layouts.
 
 ---
 

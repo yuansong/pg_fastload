@@ -203,6 +203,7 @@ BinaryWriterInsert(BinaryWriter *self, HeapTuple tuple)
 					(errcode_for_file_access(),
 					 errmsg("could not write to binary output file: %m")));
 
+		self->base.bytes += len;
 		self->used_rec_cnt = 0;
 	}
 
@@ -228,6 +229,7 @@ BinaryWriterClose(BinaryWriter *self, bool onError)
 					(errcode_for_file_access(),
 					 errmsg("could not write to binary output file: %m")));
 
+		self->base.bytes += len;
 		self->used_rec_cnt = 0;
 	}
 
@@ -252,6 +254,16 @@ BinaryWriterClose(BinaryWriter *self, bool onError)
 
 		initStringInfo(&buf);
 		appendStringInfo(&buf, "INPUT = %s\n", filepath);
+		/*
+		 * OUTPUT keeps the upstream default (the file name without its
+		 * extension), because a sample control file describes a *file*: the
+		 * relation to load into is the user's decision, and defaulting to the
+		 * table the rows came from would silently append them back into it.
+		 * An export does know that table, so it is recorded as a comment.
+		 */
+		if (self->base.sample_output)
+			appendStringInfo(&buf, "# exported from %s\n",
+							 self->base.sample_output);
 		appendStringInfo(&buf, "OUTPUT = %s\n", filename);
 		appendStringInfo(&buf, "LOGFILE = %s.log\n", filepath);
 		appendStringInfo(&buf, "PARSE_BADFILE = %s.prs\n", filepath);
@@ -365,6 +377,28 @@ BinaryWriterDumpParams(BinaryWriter *self)
 
 	LoggerLog(INFO, buf.data, 0);
 	pfree(buf.data);
+}
+
+/*
+ * Export path: tell the writer which row type the tuples it receives have.
+ *
+ * A load derives this from the tuple header (HeapTupleHeaderGetTypeId), which
+ * works because the parser builds tuples from the target descriptor.  A cursor
+ * hands out tuples that may carry no type OID at all, so the export code knows
+ * the source descriptor up front and passes it here.  The checker is switched
+ * to the binary one unconditionally, because it is the only variant that
+ * applies the per-column width and range checks that writing requires.
+ */
+void
+BinaryWriterSetSourceDesc(Writer *writer, TupleDesc src)
+{
+	BinaryWriter   *self = (BinaryWriter *) writer;
+	TupleChecker   *tc = writer->tchecker;
+
+	tc->sourceDesc = CreateTupleDescCopy(src);
+	tc->status = NEED_COERCION;
+	tc->opt = self->fields;
+	tc->checker = (CheckerTupleProc) BinaryWriterCheckerTuple;
 }
 
 static int
@@ -493,7 +527,10 @@ BinaryWriterCheckerTuple(TupleChecker *self, HeapTuple tuple, int *parsing_field
 			if (fields[i].nulllen == 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_NOT_NULL_VIOLATION),
-						 errmsg("null value violates not-null constraint")));
+						 errmsg("column %d is NULL and OUT_COL gives it no representation",
+								i + 1),
+						 errhint("A BINARY field cannot hold NULL unless a NULLIF "
+								 "pattern as wide as the field is declared.")));
 
 			continue;
 		}

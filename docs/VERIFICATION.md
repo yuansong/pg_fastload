@@ -14,6 +14,7 @@
 | Project | `pg_fastload` (standalone open-source release, version `1.0.0`) |
 | Upstream | `pg_bulkload` 3.1.23, HEAD `798e0f2`, BSD 3-Clause-style license |
 | Parallel coverage | `TYPE=CSV` and `TYPE=BINARY / FIXED` (fixed-width); `TUPLE / FUNCTION` go through the serial path |
+| Export coverage | `pgfastload.pg_fastload_export()`: `TYPE=CSV / BINARY / FIXED` from `TABLE=` or `QUERY=` (single-process, see §12) |
 | External behavior | When `PARALLEL=ON`, the above types default to multi-process parallelism; **no additional type names are introduced** — `TYPE` remains the upstream's five types; `PARALLEL_WORKERS` defaults to "online CPU cores − 1" |
 | License | The `COPYRIGHT` original text is retained; `LICENSE` / `NOTICE` added; added/modified files marked `Copyright (c) 2026, yuanyuansong`; explicitly states it is not endorsed by NTT, Inc. |
 
@@ -283,8 +284,52 @@ outside the row path and cannot fail a load).
 
 ---
 
-## 12. Conclusion
+## 12. Export Verification (2026-11-10)
 
-The current version meets the delivery criteria across eight dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (8/8 view checks on five majors, exact final numbers, no measurable cost), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
+Shipped script: `util/fl_export_test.sh` (PG 18.6, `PGPORT`/`PGUSER`/`PGDATABASE` from the
+environment). **39 assertions, all PASS, exit code 0.** Raw output: `export_pg18.out`.
+
+| Group | Checks | Result |
+|---|---|---|
+| CSV equality | **`cmp`-identical** to `COPY (SELECT * FROM exp_t) TO ... (FORMAT csv, HEADER)`; returns 5 | PASS |
+| CSV round trip | reload with `SKIP=1`, digest `5\|-1683897567441736485` equals the source | PASS |
+| CSV dialect | `DELIMITER=\| QUOTE=' NULL=\N`: embedded newline, embedded delimiter/quote, and a literal `\N` kept distinct from NULL; digest preserved | PASS |
+| `QUERY=` | `WHERE id >= 3 ORDER BY id DESC` honoured (first data row id=5, 3 rows); `LIMIT=2` returns 2 rows and writes 2 lines | PASS |
+| Empty table | returns 0, 0-byte file | PASS |
+| BINARY layout | 7 columns, 44 B/row × 4 rows = **176 B**; the sample `.ctl` `COL` lines match the `OUT_COL` declarations one for one | PASS |
+| BINARY round trip | reload with `COL=...CHAR(8)`, digest `4\|-5144772349234490677` equals the source | PASS |
+| Sample `.ctl` | carries `# exported from public.exp_bin` and keeps `OUTPUT` = file name (not the source table, so a careless run cannot append back into it) | PASS |
+| Padding semantics | the same `.bin` reloaded with `COL=VARCHAR(8)` turns `'xy'` into `'xy      '` (length 8) — documented behaviour, matching `Read_varchar` | PASS |
+| FIXED round trip | text-only layout (numbers carried in `CHAR(n)`) reloads to the source digest | PASS |
+| NULLIF | 3-row table with NULLs, `OUT_COL=INTEGER NULLIF 00000000` / `CHAR(4) NULLIF '    '`, round-trip digest `3\|3014503705147286095` | PASS |
+| Error paths | missing `OUTPUT`, relative path, `BINARY` without `OUT_COL`, `FIXED`+`INTEGER`, `OUT_COL` count mismatch, existing target, NULL without `NULLIF`, unknown keyword, no `TABLE`/`QUERY`, non-`SELECT` `QUERY`, `DELIMITER=QUOTE` — 11 rejections, all as expected | PASS |
+| Progress | during an 8M-row export another session reads `export\|running\|CSV\|serial\|true\|-\|true\|/tmp/.../big.csv`; the view is empty afterwards; output > 100 MB with 8,000,000 lines | PASS |
+
+Throughput comparison (`public.exp_big`, 8M rows / 521 MB table / 312 MiB CSV, page cache, 3 runs):
+
+| Operation | Median |
+|---|---|
+| `COPY ... TO ... (FORMAT csv)` | 0.95 s |
+| `pg_fastload_export(TYPE=CSV)` | **0.89 s** |
+
+The outputs are `cmp`-identical (326,888,896 B). The export does not participate in parallelism; that
+is a design choice, not an unfinished item (see
+[ARCHITECTURE §4.1](ARCHITECTURE.md#41-the-other-direction-export-data-flow)).
+
+Regression: the export only adds a writer and a byte counter and leaves the load path untouched;
+`fastload_verify.py` and `fastload_verify_fixed.py` were re-run afterwards and still report 90/90 and
+44/44.
+
+Multi-version: the export code reaches `INSTALL_OK` on **15.19 / 16.15 / 17.11 / 18.6 / 19rc1**. PG 19
+did expose one real difference: `TimestampTzGetDatum()` is declared in `utils/timestamp.h`, which
+`utils/builtins.h` pulled in indirectly up to 18 but no longer does in 19, so `export.c` failed with
+an `implicit declaration`; an explicit include fixes it. Functional acceptance was run on 18.6 only,
+matching the verification scope of the rest of the project.
+
+---
+
+## 13. Conclusion
+
+The current version meets the delivery criteria across nine dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (8/8 view checks on five majors, exact final numbers, no measurable cost), export (CSV/BINARY/FIXED 39/39, CSV byte-identical to `COPY`), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
 
 The residual risks can all be attributed to environmental limitations or explicit design trade-offs, as documented in §8 and [OPTIMIZATION.md](OPTIMIZATION.md), along with corresponding usage recommendations (e.g., worker-count selection for cold-cache scenarios, using `PARALLEL=OFF` when fault tolerance is needed).

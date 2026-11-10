@@ -72,6 +72,7 @@
 | 无索引表的 spool 空转消除 | ✗ | ✓（`SpoolerInsert()` 早退，省 ~0.28 s/1 GiB） |
 | 逐行容错 + badfile | ✓ | ✓（串行路径；并行路径按失败处理，见限制） |
 | 装载进度显示 | ✗ | ✓（每个装载默认发布，任何会话读 `pgfastload.pg_fastload_progress` 视图即可，见 [§4.5](#45-观察长装载的进度)） |
+| 表数据导出（CSV / BINARY / FIXED） | ✗ | ✓（`pgfastload.pg_fastload_export()`，CSV 与 `COPY ... TO` 逐字节相同，见 [§4.6](#46-反向把表导出成-csv--binary--fixed)） |
 | 全部原有控制文件关键字 | ✓ | ✓（语义不变，含 `WRITER=PARALLEL`） |
 
 ### 2.3 使用方式
@@ -294,6 +295,43 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 
 完整关键字与返回列见 [docs/USER_MANUAL.md](docs/USER_MANUAL.md)。
 
+### 4.6 反向：把表导出成 CSV / BINARY / FIXED
+
+装载是「文件 → 表」，导出是「表 → 文件」，共用同一套 Writer 与 `COL`/`OUT_COL` 布局描述：
+
+```sql
+-- CSV：与 COPY ... TO ... (FORMAT csv) 逐字节相同
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.order_line',
+  'OUTPUT=/tmp/order_line.csv',
+  'TYPE=CSV',
+  'HEADER=ON']);
+
+-- 任意 SELECT + 限行
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'QUERY=SELECT ol_w_id, ol_d_id, ol_o_id FROM public.order_line WHERE ol_w_id = 1 ORDER BY 1',
+  'OUTPUT=/tmp/ol_w1.csv',
+  'TYPE=CSV']);
+
+-- 定长二进制：OUT_COL 描述线路布局，旁边写出可直接改用的 .ctl
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.order_line',
+  'OUTPUT=/tmp/order_line.bin',
+  'TYPE=BINARY',
+  'OUT_COL=INTEGER','OUT_COL=INTEGER','OUT_COL=INTEGER',
+  'OUT_COL=INTEGER','OUT_COL=DOUBLE','OUT_COL=DOUBLE']);
+```
+
+返回 `bigint`（写出的行数）。要点：
+
+- `TABLE` 在这里是**源**，`OUTPUT` 在这里是**文件**（与装载相反）；`QUERY=` 可代替 `TABLE=`；
+- 目标是服务端本地路径、必须绝对路径、已存在则报错，绝不覆盖；需要超级用户；
+- 单进程串行（不接 `PARALLEL`）。800 万行 / 312 MiB 热缓存导出 **0.89 s**，`COPY TO` 为 0.95 s，
+  两者输出 `cmp` 相同；
+- 定长格式的文本列会被补空格到声明宽度，回灌时 `COL=CHAR(n)` 裁掉、`COL=VARCHAR(n)` 保留 ——
+  想精确往返回去就用 `CHAR(n)`（代价是原值的尾随空格丢失）。细节与限制见
+  [USER_MANUAL §18](docs/USER_MANUAL.zh-CN.md#18-导出表数据pg_fastload_export)。
+
 ---
 
 ## 5. 自动降级清单
@@ -342,9 +380,9 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 
 | 文档 | 中文 | English |
 |---|---|---|
-| 用户手册（安装 / 关键字全表 / 用法 / FAQ） | [docs/USER_MANUAL.md](docs/USER_MANUAL.md)（英） | [docs/USER_MANUAL.zh-CN.md](docs/USER_MANUAL.zh-CN.md)（中） |
-| 架构（组件职责、数据流、IPC 协议、降级设计） | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（英） | [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md)（中） |
-| 多版本适配（PG 15–19 差异与验收结果） | [docs/PORTING.md](docs/PORTING.md)（英） | [docs/PORTING.zh-CN.md](docs/PORTING.zh-CN.md)（中） |
+| 用户手册（安装 / 关键字全表 / 用法 / FAQ） | [docs/USER_MANUAL.zh-CN.md](docs/USER_MANUAL.zh-CN.md) | [docs/USER_MANUAL.md](docs/USER_MANUAL.md) |
+| 架构（组件职责、数据流、IPC 协议、降级设计） | [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| 多版本适配（PG 15–19 差异与验收结果） | [docs/PORTING.zh-CN.md](docs/PORTING.zh-CN.md) | [docs/PORTING.md](docs/PORTING.md) |
 | 相对 pg_bulkload 的修改点 | [docs/CHANGES.md](docs/CHANGES.md) | — |
 | 性能基准 | [docs/BENCHMARK.md](docs/BENCHMARK.md) | — |
 | 验证报告（用例、正确性、内存、合规） | [docs/VERIFICATION.md](docs/VERIFICATION.md) | — |

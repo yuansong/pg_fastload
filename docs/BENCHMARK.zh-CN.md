@@ -211,3 +211,27 @@ w8 5.80 / w15 5.66 s，其中首轮含上游 46.57 s 的冷启动异常，整体
 6. **带索引装载**：索引成本约占带索引装载总时间的一半（1 GiB 实测 ≈1.9 s），且该阶段在
    leader 串行执行；批量导入建议先去掉非必需索引（spool 批构建已比「装载后 `CREATE INDEX`」
    快 8.3×，见 [OPTIMIZATION.zh-CN.md](OPTIMIZATION.zh-CN.md#84-w-3并行-b-树构建)）。
+
+---
+
+## 8. 导出吞吐：`pg_fastload_export` vs `COPY TO`
+
+导出的反方向没有并行（源是游标、目标是单文件），因此它只需要与 `COPY` 对比：
+
+| 项 | 值 |
+|---|---|
+| 表 | `public.exp_big`：8,000,000 行 / 521 MB 堆表（`id int4` + `pad text`(md5)） |
+| 输出 | CSV，326,888,896 B（312 MiB） |
+| 环境 | 同 §2：16 vCPU / 7.3 GiB，热缓存，3 次取中位 |
+| `COPY ... TO ... (FORMAT csv)` | 0.95 s（≈344 MB/s、8.4M 行/s） |
+| `pg_fastload_export(TYPE=CSV)` | **0.89 s**（≈367 MB/s、9.0M 行/s） |
+| 输出一致性 | `cmp` 相同 |
+
+差值的来源是缓冲与调用开销，而不是算法：导出侧用 4 MiB `StringInfo` 缓冲，字段格式化直接调
+输出函数；`COPY` 走 `DestReceiver`，每行一次回调。两者都是单进程顺序写，因此**结论是"同一量级、
+略快"，不是"更快两个数量级"**。
+
+定长导出（`TYPE=BINARY/FIXED`）没有单独计时：它的写路径是 `Write_char`/`memcpy` 直接落缓冲区，
+比 CSV 的文本格式化更便宜，不会成为瓶颈；`NULLIF` 与宽度校验的开销在解析器侧一次完成。
+
+---
