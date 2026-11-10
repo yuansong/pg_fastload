@@ -305,16 +305,26 @@ environment). **39 assertions, all PASS, exit code 0.** Raw output: `export_pg18
 | Error paths | missing `OUTPUT`, relative path, `BINARY` without `OUT_COL`, `FIXED`+`INTEGER`, `OUT_COL` count mismatch, existing target, NULL without `NULLIF`, unknown keyword, no `TABLE`/`QUERY`, non-`SELECT` `QUERY`, `DELIMITER=QUOTE` — 11 rejections, all as expected | PASS |
 | Progress | during an 8M-row export another session reads `export\|running\|CSV\|serial\|true\|-\|true\|/tmp/.../big.csv`; the view is empty afterwards; output > 100 MB with 8,000,000 lines | PASS |
 
-Throughput comparison (`public.exp_big`, 8M rows / 521 MB table / 312 MiB CSV, page cache, 3 runs):
+Throughput (`public.exp_big`, 8M rows / 521 MB table / 312 MiB CSV, page cache, median of 5):
 
-| Operation | Median |
+| Operation | Time |
 |---|---|
-| `COPY ... TO ... (FORMAT csv)` | 0.95 s |
-| `pg_fastload_export(TYPE=CSV)` | **0.89 s** |
+| `SELECT count(*)` (16-core parallel seq scan) | 0.05 s |
+| `COPY ... TO '/dev/null' (FORMAT csv)` | 0.70 s |
+| `COPY ... TO '<file>' (FORMAT csv)` | 0.80 s |
+| `pg_fastload_export(TYPE=CSV)` → `/dev/shm` | 0.86 s |
+| `pg_fastload_export(TYPE=CSV)` → disk | **0.90 s** |
+| `pg_fastload_export(TYPE=BINARY)` → disk | 0.94 s |
+| `pg_fastload_export(QUERY=SELECT id ...)` | 0.49 s |
+| load the same CSV back, `PARALLEL=OFF` | 1.06 s |
+| load the same CSV back, `PARALLEL_WORKERS=4` | 0.48 s |
 
-The outputs are `cmp`-identical (326,888,896 B). The export does not participate in parallelism; that
-is a design choice, not an unfinished item (see
-[ARCHITECTURE §4.1](ARCHITECTURE.md#41-the-other-direction-export-data-flow)).
+The outputs are `cmp`-identical (326,888,903 B with header). The export does not participate in
+parallelism; that is a design choice, not an unfinished item (see
+[ARCHITECTURE §4.1](ARCHITECTURE.md#41-the-other-direction-export-data-flow)). The decomposition shows
+why: at 0.90 s the export is CPU-bound inside one backend, so 15 of the 16 cores stay idle, and the
+file write itself costs 0.04 s. Evidence: `export_perf.out`, `export_perf2.out`, `export_perf_bin.out`;
+numbers and reading in [BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to).
 
 Regression: the export only adds a writer and a byte counter and leaves the load path untouched;
 `fastload_verify.py` and `fastload_verify_fixed.py` were re-run afterwards and still report 90/90 and

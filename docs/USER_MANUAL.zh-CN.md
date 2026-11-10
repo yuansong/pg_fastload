@@ -744,7 +744,9 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 8. `WRITER=PARALLEL` 使用独立事务（上游行为），与调用方事务不原子。
 9. 仅在 PostgreSQL 18.6 / x86_64 Linux 上完整验证。
 10. 并行装载期间目标表持有 `AccessExclusiveLock`，与任何并发访问互斥。
-11. 导出（[§18](#18-导出表数据pg_fastload_export)）是单进程串行的，`PARALLEL` 对它无效。
+11. 导出（[§18](#18-导出表数据pg_fastload_export)）是单进程串行的，`PARALLEL` 对它无效；
+    瓶颈是单个后端的 CPU（16 核里只用到 1 核），落盘只占约 4%，见
+    [BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
 12. 定长导出用定宽字段，文本列回灌时 `CHAR(n)` 会丢尾随空格、`VARCHAR(n)` 会保留补位空格，
     二者都不等于"精确往返"（见 [§18.5](#185-往返语义务必读这一节)）。
 
@@ -868,8 +870,10 @@ identical
 
 - `HEADER=ON` 写一行列名（来自结果行的 `TupleDesc`，`QUERY=` 里的表达式列可能叫 `?column?`）。
 - 空表 + 无 `HEADER` → 0 字节文件；空表 + `HEADER=ON` → 只有表头一行。
-- 吞吐：800 万行 / 312 MiB 的表，热缓存下导出 0.89 s（`COPY TO` 0.95 s，输出 `cmp` 相同）。
-  两者都是单进程顺序写，导出略快是因为 4 MiB 缓冲 + 无 per-row 的 `DestReceiver` 开销。
+- 吞吐：800 万行 / 312 MiB 的表，热缓存下导出 0.90 s（≈363 MB/s、8.9M 行/s）；同一张表的服务端
+  `COPY TO` 是 0.80 s，输出 `cmp` 相同。导出是单进程、CPU 受限在**一个后端**里 —— 约 0.48 s 花在
+  每行的游标/deform/内存上下文开销、0.40 s 文本格式化、0.04 s 落盘 —— 其余核用不上。
+  分解见 [BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
 
 ### 18.4 BINARY / FIXED：定长布局与样例控制文件
 

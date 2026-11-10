@@ -204,25 +204,53 @@ because the fixed overhead (DSM creation, bgworker startup, on the order of tens
 
 ## 8. Export Throughput: `pg_fastload_export` vs `COPY TO`
 
-The reverse direction has no parallelism (the source is a cursor, the target is one file), so the only
-meaningful comparison is against `COPY`:
+Export is single-process by construction: one backend fetches rows from a cursor and writes one file.
+There is no `PARALLEL` keyword on this path, so the comparison is against `COPY` on one side and against
+the loader fed the same bytes on the other.
 
 | Item | Value |
 |---|---|
 | Table | `public.exp_big`: 8,000,000 rows / 521 MB heap (`id int4` + `pad text` (md5)) |
-| Output | CSV, 326,888,896 B (312 MiB) |
-| Environment | as in §2: 16 vCPU / 7.3 GiB, page cache, median of 3 |
-| `COPY ... TO ... (FORMAT csv)` | 0.95 s (≈344 MB/s, 8.4M rows/s) |
-| `pg_fastload_export(TYPE=CSV)` | **0.89 s** (≈367 MB/s, 9.0M rows/s) |
-| Output equality | `cmp`-identical |
+| Output | CSV, 326,888,903 B with header (312 MiB) |
+| Environment | as in §2: 16 vCPU / 7.3 GiB, page cache, median of 5 |
 
-The difference comes from buffering and call overhead, not from the algorithm: the export formats each
-field by calling its output function straight into a 4 MiB `StringInfo`, while `COPY` goes through a
-`DestReceiver` with one callback per row. Both are single-process sequential writers, so the conclusion
-is "same class, slightly faster", not "orders of magnitude".
+| Step | Time | What it isolates |
+|---|---|---|
+| `SELECT count(*)` | 0.05 s | reading 521 MB is free: 16-core parallel seq scan |
+| `SELECT count(*)`, parallel scan disabled | 0.14 s | the serial heap scan on its own |
+| `COPY ... TO '/dev/null' (FORMAT csv)` | 0.70 s | scan + CSV formatting, no file |
+| `COPY (SELECT ...) TO '/dev/null'` | 0.74 s | same with or without a parallel plan |
+| `COPY ... TO '<file>' (FORMAT csv)` | 0.80 s | + 0.10 s to write 327 MB |
+| `pg_fastload_export(TYPE=CSV)` → `/dev/shm` | 0.86 s | formatting only, no disk |
+| `pg_fastload_export(TYPE=CSV)` → disk | **0.90 s** | ≈363 MB/s, 8.9M rows/s |
+| `pg_fastload_export(TYPE=BINARY)` → disk | 0.94 s | 288,000,000 B fixed layout |
+| `pg_fastload_export(QUERY=SELECT id ...)` | 0.49 s | one column, 62.9 MB |
+| load the same CSV back, `PARALLEL=OFF` | 1.06 s | UNLOGGED target, `WRITER=DIRECT` |
+| load the same CSV back, `PARALLEL_WORKERS=4` | 0.48 s | 2.2× the serial load |
 
-Fixed-width export (`TYPE=BINARY/FIXED`) is not timed separately: its write path is
-`Write_char`/`memcpy` directly into the buffer, which is cheaper than CSV text formatting and cannot
-become the bottleneck; `NULLIF` and width checks cost one pass in the parser.
+Reading the table: the scan is not where the time goes. A serial heap scan of the 521 MB table costs
+0.14 s, and `COPY (SELECT ...) TO /dev/null` costs 0.74 s whether or not the planner is allowed a
+parallel scan, so ~0.70 s of either export is per-row work in the writer. Of our 0.90 s, about 0.48 s
+is per-row overhead that does not depend on what is written — cursor round trip,
+`heap_deform_tuple`, one `MemoryContextSwitchTo`/`Reset` pair per row — 0.40 s is text output plus
+quoting of the 264 MB `pad` column, and 0.04 s is the file write itself. The export is therefore
+CPU-bound inside a single backend, with 15 of the 16 cores idle, and a cursor cannot use a parallel
+plan at all. `PROGRESS=ON` is free (0.90 s either way); the clock is sampled every 512 rows.
+
+Two consequences worth stating plainly:
+
+* **Export is slower than `COPY TO`, by roughly 12%** (0.90 s vs 0.80 s server-side). The earlier
+  figure of 0.95 s in this section was `psql`'s `\copy`, which pays a client round trip for 8M rows;
+  server-side `COPY` does not. The output is still `cmp`-identical, and the export path is the one that
+  also drives BINARY/FIXED, so paying 0.10 s for one shared writer is a fair trade.
+* **BINARY is not cheaper than CSV** (0.94 s vs 0.90 s), unlike what one might expect from a
+  `memcpy`-style writer. The layout pass runs the tuple checker first — it builds a coerced tuple and
+  copies every field into its declared width — which offsets the text conversion it avoids.
+
+Parallelising this path would have to preserve row order to stay comparable (`cmp`) and to round-trip,
+so the only workable design is ctid-range partitioning into per-worker temporary files plus an ordered
+stitch, which adds a full read and write of the output. The parallel loader's 0.48 s is an upper bound
+that ignores that stitch; the realistic ceiling on this host is about 2×. It is left as a documented
+trade-off (USER_MANUAL §15, item 11) rather than shipped.
 
 ---

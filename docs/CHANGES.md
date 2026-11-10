@@ -558,14 +558,28 @@ Files added or changed:
 ### 20.3 Performance
 
 An export runs single-process serially (the source is a cursor and the target is one file, so there is
-no read amplification to spread), and therefore ignores `PARALLEL`. It is in the same class as
-`COPY TO` and slightly faster, thanks to the 4 MiB buffer and the absence of a per-row
-`DestReceiver`:
+no read amplification to spread), and therefore ignores `PARALLEL`. Measured against both `COPY` and
+the loader on the same bytes:
 
-| Operation | 8M rows / 312 MiB (page cache, median of 3) | Output |
-|---|---|---|
-| `COPY ... TO ... (FORMAT csv)` | 0.95 s | 326,888,896 B |
-| `pg_fastload_export(TYPE=CSV)` | **0.89 s** | 326,888,896 B (`cmp`-identical) |
+| Operation | 8M rows / 521 MB table / 312 MiB CSV (page cache, median of 5) |
+|---|---|
+| `SELECT count(*)` (16-core parallel seq scan) | 0.05 s |
+| `COPY ... TO '/dev/null' (FORMAT csv)` | 0.70 s |
+| `COPY ... TO '<file>' (FORMAT csv)` | 0.80 s |
+| `pg_fastload_export(TYPE=CSV)` → `/dev/shm` | 0.86 s |
+| `pg_fastload_export(TYPE=CSV)` → disk | **0.90 s** |
+| `pg_fastload_export(TYPE=BINARY)` → disk | 0.94 s |
+| `pg_fastload_export(QUERY=SELECT id ...)` | 0.49 s |
+| load the same CSV, `PARALLEL=OFF` | 1.06 s |
+| load the same CSV, `PARALLEL_WORKERS=4` | 0.48 s |
+
+The first round of this measurement compared against `psql`'s `\copy` (0.95 s) and concluded the export
+was slightly faster. That was wrong: `\copy` pays a client round trip for 8M rows. Server-side `COPY`
+takes 0.80 s, so the export is ~12% slower — one shared writer for CSV/BINARY/FIXED, byte-identical
+output, 0.04 s of the total spent on the file itself.
+
+BINARY is not cheaper than CSV either (0.94 s vs 0.90 s): its layout pass runs the tuple checker, which
+builds a coerced tuple and copies every field into its declared width.
 
 ### 20.4 Verification
 

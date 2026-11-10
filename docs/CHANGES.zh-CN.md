@@ -506,12 +506,26 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 ### 20.3 性能
 
 导出是单进程串行的（源是游标、目标是单文件，没有读放大可摊），因此不接 `PARALLEL`。
-与 `COPY TO` 同量级并略快，因为 4 MiB 缓冲且没有 per-row `DestReceiver`：
+与 `COPY` 和"把同样的字节装回去"分别对照后：
 
-| 操作 | 800 万行 / 312 MiB（热缓存，3 次中位） | 输出 |
-|---|---|---|
-| `COPY ... TO ... (FORMAT csv)` | 0.95 s | 326,888,896 B |
-| `pg_fastload_export(TYPE=CSV)` | **0.89 s** | 326,888,896 B（`cmp` 相同） |
+| 操作 | 800 万行 / 521 MB 表 / 312 MiB CSV（热缓存，5 次中位） |
+|---|---|
+| `SELECT count(*)`（16 核并行顺序扫描） | 0.05 s |
+| `COPY ... TO '/dev/null' (FORMAT csv)` | 0.70 s |
+| `COPY ... TO '<文件>' (FORMAT csv)` | 0.80 s |
+| `pg_fastload_export(TYPE=CSV)` → `/dev/shm` | 0.86 s |
+| `pg_fastload_export(TYPE=CSV)` → 磁盘 | **0.90 s** |
+| `pg_fastload_export(TYPE=BINARY)` → 磁盘 | 0.94 s |
+| `pg_fastload_export(QUERY=SELECT id ...)` | 0.49 s |
+| 同一份 CSV 装回来，`PARALLEL=OFF` | 1.06 s |
+| 同一份 CSV 装回来，`PARALLEL_WORKERS=4` | 0.48 s |
+
+第一轮测量拿 `psql` 的 `\copy`（0.95 s）当基准，得出"导出略快"的结论，这是错的：`\copy` 要为
+800 万行走一趟客户端往返。服务端 `COPY` 是 0.80 s，导出实际慢约 12% —— 一个共享 writer 同时
+服务 CSV/BINARY/FIXED，输出逐字节相同，整个 0.90 s 里只有 0.04 s 花在文件上。
+
+定长也不比 CSV 便宜（0.94 s 对 0.90 s）：它的布局 pass 要先跑 tuple checker，建强制转换后的
+元组、把每个字段拷进声明宽度。
 
 ### 20.4 验证
 

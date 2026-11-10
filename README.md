@@ -347,8 +347,10 @@ Returns `bigint` (rows written). Points worth knowing:
   replace `TABLE=`;
 - the target is a server-side absolute path that must not exist yet — nothing is ever overwritten;
   superuser is required;
-- single-process serial (no `PARALLEL`). 8M rows / 312 MiB from page cache: **0.89 s** against
-  `COPY TO`'s 0.95 s, with `cmp`-identical output;
+- single-process serial (no `PARALLEL`). 8M rows / 312 MiB from page cache: **0.90 s** (≈363 MB/s)
+  against server-side `COPY TO`'s 0.80 s, with `cmp`-identical output. It is CPU-bound in one backend,
+  not I/O-bound: see [BENCHMARK §8](docs/BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to)
+  for the breakdown;
 - a fixed-width field is padded with spaces, and the loader trims it back with `COL=CHAR(n)` but keeps
   it with `COL=VARCHAR(n)` — use `CHAR(n)` when you want the round trip (at the cost of losing trailing
   blanks of the original value). Details and limits:
