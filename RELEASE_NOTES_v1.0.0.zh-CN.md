@@ -16,12 +16,12 @@ English version: [RELEASE_NOTES_v1.0.0.md](https://github.com/yuansong/pg_fastlo
 
 | # | 能力 | 实测 |
 |---|---|---|
-| 1 | 并行装载仍然只有一个事务：①②③ 交给 N 个 bgworker，④ 留在调用方串行 —— 不额外开连接、未提交的行不会被看到、原子性与串行一致 | 5.81 s → **1.37 s（4.24×）**，1 GiB / 737 万行，16 vCPU |
+| 1 | 并行装载仍然只有一个事务：①②③ 交给 N 个 bgworker，④ 留在调用方串行 —— 不额外开连接、未提交的行不会被看到、原子性与串行一致 | 5.81 s → **1.37 s（4.24×）**，1 GiB / 737 万行，16 vCPU —— 即 **`COPY ... FROM` 的 6.07×** |
 | 2 | 输入文件只读一遍，因此数据超出 page cache 后加速比也不会倒挂 | 任意 worker 数下均为 1× 读取 |
-| 3 | 串行路径本身就是最快的：无引号记录用 `memchr` 批量切分，不再走逐字节状态机 | **上游 pg_bulkload 的 1.20×**、**`COPY ... FROM` 的 1.46×** |
+| 3 | 串行路径本身就是最快的：无引号记录用 `memchr` 批量切分，不再走逐字节状态机 | **上游 pg_bulkload 的 1.22×**、**`COPY ... FROM` 的 1.43×** |
 | 4 | 不会悄悄改变语义：13 种情况自动降级到串行并打一行 `INFO`，坏行让整次装载失败，而不是留下取决于时序的子集 | 13 类降级、全有或全无 |
 | 5 | 从 pg_bulkload 平滑迁移：控制文件关键字、`TYPE` 取值、日志格式、`WRITER` 模式全部一致 | 只需改两个标识符 |
-| 6 | 双向一个引擎：`pgfastload.pg_fastload_export()` 用同一套 Writer 与 `COL` / `OUT_COL` 布局写出 CSV / BINARY / FIXED | 并行导出 **9.60×**；CSV 与 `COPY ... TO` 逐字节相同 |
+| 6 | 双向一个引擎：`pgfastload.pg_fastload_export()` 用同一套 Writer 与 `COL` / `OUT_COL` 布局写出 CSV / BINARY / FIXED | 并行导出相对串行 **9.60×**、相对 `COPY ... TO` **9.33×**；CSV 与 `COPY ... TO` 逐字节相同 |
 
 ## 功能清单
 
@@ -46,16 +46,16 @@ FIXED`、`OUT_COL`、`HEADER`、`LIMIT`、`DELIMITER` / `QUOTE` / `ESCAPE` / `NU
 
 ## 性能（1 GiB / 737 万行，16 vCPU，热缓存，`DIRECT`，无索引）
 
-| 配置 | 耗时 | 相对串行 |
-|---|---|---|
-| `PARALLEL=OFF` | 5.81 s | 1.00× |
-| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× |
-| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× |
-| `PARALLEL=ON`（15 worker） | **1.37 s** | **4.24×** |
+| 配置 | 耗时 | 相对串行 | 相对 `COPY ... FROM` |
+|---|---|---|---|
+| `PARALLEL=OFF` | 5.81 s | 1.00× | 1.43× |
+| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× | 3.01× |
+| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× | 5.27× |
+| `PARALLEL=ON`（15 worker） | **1.37 s** | **4.24×** | **6.07×** |
 
-同一文件的参照点：上游 pg_bulkload 3.1.23 7.00 s、`COPY ... FROM` 8.48 s、`COPY` 进 UNLOGGED 表
-7.67 s。定长 1 GiB：串行 1.62 s → 8 worker 0.89 s。导出 740 万行 / 1.13 GiB：串行 4.08 s →
-15 worker 0.42 s。
+同一文件的参照点：上游 pg_bulkload 3.1.23 6.98 s、`COPY ... FROM` 8.32 s、`COPY` 进 UNLOGGED 表
+7.51 s。定长 1 GiB：串行 1.62 s → 8 worker 0.89 s。导出 740 万行 / 1.13 GiB：串行 4.08 s →
+15 worker 0.42 s（相对 `COPY ... TO` 9.33×）。
 
 方法与全部前提说明：[docs/BENCHMARK.zh-CN.md](https://github.com/yuansong/pg_fastload/blob/master/docs/BENCHMARK.zh-CN.md)。
 

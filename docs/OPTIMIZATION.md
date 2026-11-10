@@ -60,21 +60,22 @@ Cumulative: **15 adopted optimizations + 1 round of code cleanup; 4 rejected** (
 > "Original baseline" is the median of the first version (each worker scanning the full file, with per-record modulo routing), hence w=1 as high as 16.2 s.
 >
 > Round 8 removed ~1.0 s of per-byte field splitting from every configuration, which is why the serial column moves too:
-> the serial path is now 1.20× upstream `pg_bulkload` and 1.46× `COPY ... FROM` ([BENCHMARK §3.1](BENCHMARK.md#31-the-serial-path-against-upstream-and-against-copy--from)).
+> the serial path is now 1.22× upstream `pg_bulkload` and 1.43× `COPY ... FROM`, and with parallelism on the load is
+> 6.07× `COPY ... FROM` ([BENCHMARK §3, §3.1](BENCHMARK.md#31-the-serial-path-against-upstream-and-against-copy--from)).
 > `fl_w15` was not re-measured separately; at that width it tracks `auto` within noise (they share the same 15-worker default).
 
 ---
 
 ## 4. Cold-cache evolution (posix_fadvise eviction, 1 GiB)
 
-| Config | First ver. (N× scan) | Single-reader, multi-worker (ring buffer + small block) | Final version (good window) | Note |
+| Config | First ver. (N× scan) | Single-reader, multi-worker (ring buffer + small block) | Final version (good window) | `COPY ... FROM` (same conditions) |
 |---|---|---|---|---|
-| orig / fl_off | ≈7.1 s | ≈7.1 s | 7.07~7.20 s (stable) | serial always stable |
-| fl_w2 | 46.1 s (6.49× slower) | 30~37 s | **≈3.0 s (2.4× vs serial)** | see below for occasional stalling rounds |
-| fl_w4 | — | ≈31.7 s | **≈1.8 s (4.0× vs serial)** | same as above |
-| fl_auto | — | ≈30.1 s | **≈1.5 s (4.9× vs serial)** | same as above |
+| orig / fl_off | ≈7.1 s | ≈7.1 s | 5.81~5.94 s (stable) | 8.50~8.57 s |
+| fl_w2 | 46.1 s (6.49× slower) | 30~37 s | **≈3.0 s (1.95× vs serial, 2.82× `COPY`)** | 8.53 s |
+| fl_w4 | — | ≈31.7 s | **≈1.8 s (3.24× vs serial, 4.69× `COPY`)** | 8.53 s |
+| fl_auto | — | ≈30.1 s | **≈1.5 s (3.81× vs serial, 5.50× `COPY`)** | 8.53 s |
 
-**Residual note**: the final version still has random 11~62 s stalling rounds. Diagnostics (vmstat, dd probes, multiple rounds of cold_diag) confirmed that within the stall window the guest has 0 steal / 0 iowait / 100% idle, and total read volume and bandwidth are normal — this belongs to **host/hypervisor amplification of latency for blocking syscalls** (a single blocking call amplified to ~1.85 ms); the serial path is largely immune because stdio's large-block fread has ~500× fewer syscalls. The code-side systematic component (small blocks ×33k syscalls) was eliminated by S-2: before the fix 100% of parallel rounds were affected, after the fix only random windows are affected, and under good windows it surpasses serial by up to 4.9×.
+**Residual note**: the final version still has random 11~62 s stalling rounds. Diagnostics (vmstat, dd probes, multiple rounds of cold_diag) confirmed that within the stall window the guest has 0 steal / 0 iowait / 100% idle, and total read volume and bandwidth are normal — this belongs to **host/hypervisor amplification of latency for blocking syscalls** (a single blocking call amplified to ~1.85 ms); the serial path is largely immune because stdio's large-block fread has ~500× fewer syscalls. The code-side systematic component (small blocks ×33k syscalls) was eliminated by S-2: before the fix 100% of parallel rounds were affected, after the fix only random windows are affected, and under good windows it surpasses serial by 3.8× and `COPY ... FROM` by 5.5×.
 
 ---
 
@@ -87,9 +88,10 @@ Cumulative: **15 adopted optimizations + 1 round of code cleanup; 4 rejected** (
    **1.81× / 1.68× / 1.69×** (≈4.2× vs. serial, already saturated at the leader-side serial `WriterInsert`
    structural floor of ~1.14 s/1 GiB);
 5. **Fixed-length mode**: 1 GiB serial 1.62 s → fastest parallel 0.89 s (**1.82×**);
-6. **Cold cache**: from 6.49× slower than serial in the first version → under good windows **surpasses serial by up to 4.9×**;
+6. **Cold cache**: from 6.49× slower than serial in the first version → under good windows **surpasses serial by 3.8×**
+   (and `COPY ... FROM` by 5.5×);
 7. **Serial path (PARALLEL=OFF)**: 8.19 → **5.81 s (1.41×)**, of which W-3a contributed the spool early exit and
-   Round 8 the bulk field split; it now runs **1.20× upstream pg_bulkload** and **1.46× `COPY ... FROM`**
+   Round 8 the bulk field split; it now runs **1.22× upstream pg_bulkload** and **1.43× `COPY ... FROM`**
    on the same file.
 
 ---

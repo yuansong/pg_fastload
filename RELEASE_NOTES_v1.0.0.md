@@ -17,12 +17,12 @@ inside the caller's transaction.
 
 | # | What | Measured |
 |---|---|---|
-| 1 | Parallel load that stays one transaction: stages ①②③ in N bgworkers, ④ serial in the caller — no second connection, no early visibility, same atomicity as serial | 5.81 s → **1.37 s (4.24×)**, 1 GiB / 7.37 M rows, 16 vCPU |
+| 1 | Parallel load that stays one transaction: stages ①②③ in N bgworkers, ④ serial in the caller — no second connection, no early visibility, same atomicity as serial | 5.81 s → **1.37 s (4.24×)**, 1 GiB / 7.37 M rows, 16 vCPU — **6.07× `COPY ... FROM`** |
 | 2 | The input file is read exactly once, so the speedup does not invert when the data outgrows the page cache | 1× read at every worker count |
-| 3 | The serial path is the fastest available: quote-free records take a bulk `memchr` split instead of the byte-at-a-time state machine | **1.20× upstream pg_bulkload**, **1.46× `COPY ... FROM`** |
+| 3 | The serial path is the fastest available: quote-free records take a bulk `memchr` split instead of the byte-at-a-time state machine | **1.22× upstream pg_bulkload**, **1.43× `COPY ... FROM`** |
 | 4 | Never a silent semantic change: 13 conditions fall back to serial with one `INFO` line, and a bad row fails the load instead of keeping a timing-dependent subset | 13 downgrade cases, all-or-nothing |
 | 5 | Drop-in from pg_bulkload: same control keywords, `TYPE` values, log format and `WRITER` modes | rename two identifiers |
-| 6 | Both directions in one engine: `pgfastload.pg_fastload_export()` writes CSV / BINARY / FIXED with the same Writer and `COL` / `OUT_COL` layout | **9.60×** parallel export; CSV byte-identical to `COPY ... TO` |
+| 6 | Both directions in one engine: `pgfastload.pg_fastload_export()` writes CSV / BINARY / FIXED with the same Writer and `COL` / `OUT_COL` layout | **9.60×** parallel export vs serial, **9.33× vs `COPY ... TO`**; CSV byte-identical to `COPY ... TO` |
 
 ## Feature summary
 
@@ -48,16 +48,16 @@ with the majors isolated behind `PG_VERSION_NUM` at compile time.
 
 ## Performance (1 GiB / 7.37 M rows, 16 vCPU, warm cache, `DIRECT`, no indexes)
 
-| Configuration | Time | vs serial |
-|---|---|---|
-| `PARALLEL=OFF` | 5.81 s | 1.00× |
-| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× |
-| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× |
-| `PARALLEL=ON` (15 workers) | **1.37 s** | **4.24×** |
+| Configuration | Time | vs serial | vs `COPY ... FROM` |
+|---|---|---|---|
+| `PARALLEL=OFF` | 5.81 s | 1.00× | 1.43× |
+| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× | 3.01× |
+| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× | 5.27× |
+| `PARALLEL=ON` (15 workers) | **1.37 s** | **4.24×** | **6.07×** |
 
-Reference points on the same file: upstream pg_bulkload 3.1.23 7.00 s, `COPY ... FROM` 8.48 s,
-`COPY` into an UNLOGGED table 7.67 s. Fixed-length 1 GiB: 1.62 s serial → 0.89 s with 8 workers.
-Export 7.4 M rows / 1.13 GiB: 4.08 s serial → 0.42 s with 15 workers.
+Reference points on the same file: upstream pg_bulkload 3.1.23 6.98 s, `COPY ... FROM` 8.32 s,
+`COPY` into an UNLOGGED table 7.51 s. Fixed-length 1 GiB: 1.62 s serial → 0.89 s with 8 workers.
+Export 7.4 M rows / 1.13 GiB: 4.08 s serial → 0.42 s with 15 workers (9.33× `COPY ... TO`).
 
 Method and all caveats: [docs/BENCHMARK.md](https://github.com/yuansong/pg_fastload/blob/master/docs/BENCHMARK.md).
 
