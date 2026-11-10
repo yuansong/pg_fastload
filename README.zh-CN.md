@@ -33,6 +33,7 @@
 - `PARALLEL=ON` 配 `PARALLEL_WORKERS=1..64`（默认 = 在线 CPU 核数 − 1）；CSV 与定长**都能并行**。
 - 上游三种写入模式语义不变：`WRITER=DIRECT` / `BUFFERED` / `PARALLEL`。
 - `SKIP` / `LIMIT`、`DUPLICATE_*` 策略、`FILTER`、`FORCE_NOT_NULL`、`NULLIF`、`ENCODING`、`TRUNCATE=YES`、`MULTI_PROCESS`。
+- `SKIP_INDEX=ON` 装载时先摘除目标表索引、结束后原样打印重建用的 `CREATE INDEX` 语句——反正要重建索引的场合，索引维护那约一半的装载时间直接省掉。
 - `PARSE_ERRORS` + `PARSE_BADFILE` 逐行容错（串行路径，见 [§6](#6-需要知道的限制)）。
 
 **导出**
@@ -116,6 +117,7 @@
 | 不支持的语义自动降级 + INFO 提示 | — | ✓（13 类，见 [§5](#5-自动降级清单)） |
 | 阶段级耗时剖析（profile） | 部分阶段 | ✓ `GLOBAL` / `READER` / `CSV` / `WRITER` / `MERGE` / `PARALLEL` / `WORKER` 全阶段，含 worker 侧 SCAN/FORM/IPC |
 | 无索引表的 spool 空转消除 | ✗ | ✓（`SpoolerInsert()` 早退，省 ~0.28 s/1 GiB） |
+| 装载时跳过索引维护 | ✗ | ✓（`SKIP_INDEX=ON`：摘索引 + 原样打印重建 DDL，带索引表约省一半装载时间） |
 | 逐行容错 + badfile | ✓ | ✓（串行路径；并行路径按失败处理，见限制） |
 | 装载进度显示 | ✗ | ✓（每个装载默认发布，任何会话读 `pgfastload.pg_fastload_progress` 视图即可，见 [§4.5](#45-观察长装载的进度)） |
 | 表数据导出（CSV / BINARY / FIXED） | ✗ | ✓（`pgfastload.pg_fastload_export()`，CSV 与 `COPY ... TO` 逐字节相同，见 [§4.6](#46-反向把表导出成-csv--binary--fixed)） |

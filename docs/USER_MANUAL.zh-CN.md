@@ -301,7 +301,24 @@ KEY = 'VALUE WITH SPACES'
 |---|---|---|---|
 | `OUTPUT` / `TABLE` | `schema.table` | 无（必填） | 目标表；只写表名，**不写库名**（库由连接决定） |
 | `TRUNCATE` | `YES` / `NO` | `NO` | 装载前清空目标表 |
+| `SKIP_INDEX` | `YES` / `NO` | `NO` | 装载期间丢弃目标表的二级索引，装载完成后由用户自行重建（见下） |
 | `VERBOSE` | `YES` / `NO` | `NO` | 输出更详细的进度日志 |
+
+| `VERBOSE` | `YES` / `NO` | `NO` | 输出更详细的进度日志 |
+
+**`SKIP_INDEX=ON`。** 装载期间维护索引的代价与装载本身相当（实测单个 btree 约 1.9 s/GiB，
+约占带索引装载时间的一半）。`SKIP_INDEX=ON` 用一个明确的契约把这代价换掉：
+
+* **装载开始前**，目标表的所有*普通*二级索引被删除（发生在装载自己的事务内——装载失败时
+  删除随事务一起回滚，错误路径什么都不丢）。
+* **装载成功后**，装载器打印对应的 `CREATE INDEX` 语句——每条一个 `NOTICE`，`LOGFILE` 里
+  同步留档——**由你**来执行它们。在你重建之前，这些索引不存在，不存在"静默损坏"的中间态。
+* 带**约束**的索引（`PRIMARY KEY` / `UNIQUE` / `EXCLUSION` 约束的支撑索引）会直接报
+  ERROR 拒绝：装载器不会悄悄移除一个约束。请自行先删约束、装载、再重建约束。
+* `SKIP_INDEX` 不能与 `DUP_ERRORS` 组合（重复容忍依赖唯一索引 spool 合并）。
+  `ON_DUPLICATE_KEEP` 可以给，但没有唯一索引时它不生效；丢弃唯一索引时会打 `WARNING`。
+* `WRITER=DIRECT` 与 `WRITER=BUFFERED`、串行与并行均可用；索引删掉后，spool 阶段
+  自然从装载路径上消失。
 
 ### 6.4 CSV 解析（`TYPE=CSV`）
 

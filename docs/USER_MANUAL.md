@@ -296,7 +296,31 @@ Every keyword can also be supplied on the command line with `-o KEY=VALUE`
 |---|---|---|---|
 | `OUTPUT` / `TABLE` | `schema.table` | required | target table; table name only, **no database name** (the connection decides) |
 | `TRUNCATE` | `YES` / `NO` | `NO` | truncate the target before loading |
+| `SKIP_INDEX` | `YES` / `NO` | `NO` | drop the target's secondary indexes for the load; rebuild them yourself afterwards (see below) |
 | `VERBOSE` | `YES` / `NO` | `NO` | more detailed progress logging |
+
+| `VERBOSE` | `YES` / `NO` | `NO` | more detailed progress logging |
+
+**`SKIP_INDEX=ON`.** Maintaining indexes during a load costs about as much as
+the load itself (measured ≈1.9 s/GiB for one btree, roughly half of an indexed
+load). `SKIP_INDEX=ON` trades that away for speed with an explicit contract:
+
+* **Before loading**, every *plain* secondary index of the target table is
+  dropped (inside the load's own transaction — a failed load rolls the drops
+  back together with the rows, so nothing is lost on error).
+* **After a successful load** the loader prints the matching `CREATE INDEX`
+  statements — one `NOTICE` per statement, plus a copy in the `LOGFILE` — and
+  it is **your job** to run them. Until you do, queries that use those indexes
+  are not possible (they no longer exist); there is no silently-corrupt state.
+* Constraint-backed indexes (`PRIMARY KEY` / `UNIQUE` / `EXCLUSION`
+  constraints) are **refused** with an ERROR: the loader will not remove a
+  constraint silently. Drop the constraint, load, and re-create it yourself.
+* `SKIP_INDEX` cannot be combined with `DUP_ERRORS` (duplicate tolerance needs
+  the unique-index spool merge). `ON_DUPLICATE_KEEP` is accepted but inert
+  without a unique index; dropping a unique index produces a `WARNING`.
+* Works with both `WRITER=DIRECT` and `WRITER=BUFFERED`, serial or parallel;
+  with the indexes gone, the spool stage disappears from the load path on its
+  own.
 
 ### 6.4 CSV parsing (`TYPE=CSV`)
 

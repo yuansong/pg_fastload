@@ -14,8 +14,13 @@
 #include <time.h>
 
 #include "access/heapam.h"
+#include "access/genam.h"
 #include "access/reloptions.h"
+#include "access/skey.h"
+#include "catalog/dependency.h"
+#include "catalog/index.h"
 #include "catalog/objectaddress.h"
+#include "catalog/pg_constraint.h"
 #if PG_VERSION_NUM >= 120000
 #include "catalog/pg_am.h"
 #endif
@@ -27,10 +32,12 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/datetime.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
 
 #include "common.h"
 #include "logger.h"
@@ -50,7 +57,9 @@ PG_FUNCTION_INFO_V1(pg_fastload);
 Datum	PGUT_EXPORT pg_fastload(PG_FUNCTION_ARGS);
 
 static char *timeval_to_cstring(struct timeval tp);
-static void ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm);
+static void ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm,
+						 bool *skip_index);
+static List *SkipTargetIndexes(Oid relid);
 
 /* Parallel CSV loader (lib/fastload_parallel.c) */
 extern bool  FastloadParallelSupported(Reader *rd, Writer *wt);
@@ -216,6 +225,8 @@ pg_fastload(PG_FUNCTION_ARGS)
 	Datum			values[PG_FASTLOAD_COLS];
 	bool			nulls[PG_FASTLOAD_COLS];
 	HeapTuple		result;
+	bool			skip_index = false;
+	List		   *skip_ddls = NIL;
 
 	/* Build a tuple descriptor for our result type */
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
@@ -252,7 +263,7 @@ pg_fastload(PG_FUNCTION_ARGS)
 	 */
 
 	/* parse options and create reader and writer */
-	ParseOptions(options, &rd, &wt, ru0.tv.tv_sec);
+	ParseOptions(options, &rd, &wt, ru0.tv.tv_sec, &skip_index);
 
 	/* initialize reader */
 	ReaderInit(rd);
@@ -267,6 +278,17 @@ pg_fastload(PG_FUNCTION_ARGS)
 		/* truncate heap */
 		if (wt->truncate)
 			TruncateTable(wt->relid);
+
+		/*
+		 * SKIP_INDEX=ON: drop the target table's plain secondary indexes
+		 * *before* the writer opens them (SpoolerOpen() runs ExecOpenIndices
+		 * during WriterInit).  The DROP happens inside the load transaction,
+		 * so a failed load rolls it back together with the rows; after a
+		 * successful load the CREATE INDEX statements in skip_ddls are
+		 * printed (NOTICE + LOGFILE) for the user to rebuild the indexes.
+		 */
+		if (skip_index && OidIsValid(wt->relid))
+			skip_ddls = SkipTargetIndexes(wt->relid);
 
 		/* initialize writer */
 		WriterInit(wt);
@@ -460,6 +482,33 @@ pg_fastload(PG_FUNCTION_ARGS)
 			  "  " int64_FMT " Rows replaced with new rows.\n\n",
 			  skip, count, parse_errors, ret.num_dup_new, ret.num_dup_old);
 
+	/*
+	 * SKIP_INDEX=ON: the load succeeded and the transaction is about to
+	 * commit, which drops the indexes for good -- the user has to rebuild
+	 * them.  Print one NOTICE per statement so the information reaches the
+	 * client, and a copy into the LOGFILE.
+	 */
+	if (skip_ddls != NIL)
+	{
+		ListCell   *lc;
+
+		LoggerLog(INFO, "SKIP_INDEX dropped %d index(es); recreate with:\n",
+				  list_length(skip_ddls));
+		ereport(NOTICE,
+				(errcode(ERRCODE_SUCCESSFUL_COMPLETION),
+				 errmsg("pg_fastload: %d index(es) were dropped by SKIP_INDEX "
+						"and are not maintained any more; re-create them "
+						"with the statements printed below",
+						list_length(skip_ddls))));
+		foreach (lc, skip_ddls)
+		{
+			char	   *ddl = (char *) lfirst(lc);
+
+			LoggerLog(INFO, "  %s;\n", ddl);
+			ereport(NOTICE, (errmsg("  %s;", ddl)));
+		}
+	}
+
 	pg_rusage_init(&ru1);
 	system = diffTime(ru1.ru.ru_stime, ru0.ru.ru_stime);
 	user = diffTime(ru1.ru.ru_utime, ru0.ru.ru_utime);
@@ -576,6 +625,105 @@ TruncateTable(Oid relid)
 	CommandCounterIncrement();
 }
 
+/*
+ * SKIP_INDEX=ON: drop every plain secondary index of the target table before
+ * the writer opens it, and collect the CREATE INDEX statements needed to
+ * rebuild them.  Must be called BEFORE WriterInit(), because SpoolerOpen()
+ * runs ExecOpenIndices() on whatever indexes still exist at that point.
+ *
+ * The drops happen inside the load's transaction: if the load fails, the
+ * statement aborts and the indexes come back untouched.  After a successful
+ * commit they are gone for good, so the caller must print the collected DDL
+ * (NOTICE + LOGFILE) before returning.
+ *
+ * Constraint-backed indexes (PRIMARY KEY / UNIQUE / EXCLUSION constraints)
+ * are refused: performDeletion would reject them anyway, and a bulk loader
+ * must not silently remove a constraint the user cannot trivially restore.
+ */
+static List *
+SkipTargetIndexes(Oid relid)
+{
+	Relation	rel;
+	List	   *indexOids;
+	List	   *ddls = NIL;
+	ListCell   *lc;
+
+	rel = table_open(relid, AccessExclusiveLock);
+	indexOids = RelationGetIndexList(rel);
+	table_close(rel, AccessExclusiveLock);
+
+	if (indexOids == NIL)
+	{
+		LoggerLog(INFO, "SKIP_INDEX = ON, but the target table has no "
+				  "index; nothing to skip\n");
+		return NIL;
+	}
+
+	foreach (lc, indexOids)
+	{
+		Oid			idxOid = lfirst_oid(lc);
+		Relation	idxrel;
+		Relation	conrel;
+		SysScanDesc	scan;
+		ScanKeyData	key;
+		HeapTuple	tup;
+		ObjectAddress	obj;
+		char	   *ddl;
+		char	   *idxname = get_rel_name(idxOid);
+
+		/* Constraint-backed index?  A plain heap scan on pg_constraint:
+		 * since PG 17 the dedicated conindid index no longer exists (the
+		 * (conrelid, contypid, conindid) index replaced it), and the
+		 * catalog is tiny, so the version-independent choice is a heap
+		 * scan keyed on conindid. */
+		ScanKeyInit(&key,
+					Anum_pg_constraint_conindid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(idxOid));
+		conrel = table_open(ConstraintRelationId, AccessShareLock);
+		scan = systable_beginscan(conrel, InvalidOid, false,
+								  NULL, 1, &key);
+		tup = systable_getnext(scan);
+		if (HeapTupleIsValid(tup))
+		{
+			systable_endscan(scan);
+			table_close(conrel, AccessShareLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("SKIP_INDEX cannot drop index \"%s\" because a "
+							"table constraint depends on it",
+							idxname ? idxname : "unknown"),
+					 errhint("Drop the constraint manually, run the load, "
+							 "then re-create the constraint.")));
+		}
+		systable_endscan(scan);
+		table_close(conrel, AccessShareLock);
+
+		/* The rebuild statement, captured before the drop. */
+		ddl = pg_get_indexdef_string(idxOid);
+		ddls = lappend(ddls, ddl);
+
+		/* Warn before dropping a unique index: duplicate handling relies on it. */
+		idxrel = index_open(idxOid, AccessExclusiveLock);
+		if (idxrel->rd_index->indisunique)
+			ereport(WARNING,
+					(errmsg("SKIP_INDEX drops unique index \"%s\": duplicate "
+							"keys will not be detected during this load",
+							idxname ? idxname : "unknown")));
+		index_close(idxrel, AccessExclusiveLock);
+
+		obj.classId = RelationRelationId;
+		obj.objectId = idxOid;
+		obj.objectSubId = 0;
+		performDeletion(&obj, DROP_RESTRICT, 0);
+	}
+
+	list_free(indexOids);
+	CommandCounterIncrement();
+
+	return ddls;
+}
+
 static char *
 timeval_to_cstring(struct timeval tp)
 {
@@ -597,7 +745,8 @@ timeval_to_cstring(struct timeval tp)
 }
 
 static void
-ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm)
+ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm,
+			 bool *skip_index)
 {
 	List		   *defs;
 	List		   *rest_defs = NIL;
@@ -608,6 +757,7 @@ ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm)
 	char		   *type = NULL;
 	char		   *writer = NULL;
 	bool			multi_process = false;
+	bool			skip_index_opt = false;
 
 	Assert(*rd == NULL);
 	Assert(*wt == NULL);
@@ -639,6 +789,10 @@ ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm)
 		{
 			multi_process = ParseBoolean(value);
 		}
+		else if (CompareKeyword(keyword, "SKIP_INDEX"))
+		{
+			skip_index_opt = ParseBoolean(value);
+		}
 		else
 		{
 			rest_defs = lappend(rest_defs, opt);
@@ -663,6 +817,18 @@ ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm)
 				 errmsg("invalid keyword \"%s\"", keyword)));
 		}
 	}
+
+	/*
+	 * SKIP_INDEX conflicts with DUP_ERRORS: tolerance counting works on the
+	 * unique-index spool merge, which SKIP_INDEX is about to remove.
+	 * (ON_DUPLICATE_KEEP is inert without a unique index and stays allowed.)
+	 */
+	if (skip_index && (*wt)->max_dup_errors > 0)
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("SKIP_INDEX cannot be combined with DUP_ERRORS"),
+			 errhint("Duplicate tolerance needs the unique indexes that "
+					 "SKIP_INDEX drops.")));
 
 	/*
 	 * checking necessary common setting items
@@ -801,4 +967,6 @@ ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm)
 	}
 
 	(*wt)->logfile = pstrdup((*rd)->logfile);
+
+	*skip_index = skip_index_opt;
 }
