@@ -15,6 +15,49 @@ workers, while the insert stage stays in one process and one transaction.
 
 ---
 
+## At a glance
+
+**Six things worth knowing before the details.** Every number below is measured on the same
+1 GiB / 7.37 M row CSV, 16 vCPU, warm cache, `DIRECT`, no indexes — methodology and the full
+reference set in [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+| # | Advantage | Measured / guarantee |
+|---|---|---|
+| 1 | **Parallel loading that stays one transaction.** Stages ①②③ move to N background workers, stage ④ stays serial in the caller: no second connection, no early visibility of uncommitted rows, identical atomicity to a serial load. | 5.81 s → **1.37 s (4.24×)** with 15 workers |
+| 2 | **The input file is read exactly once.** A single reader scans sequentially and distributes chunks; workers never touch the file. Total reads stay at 1× the file size, so the speedup does not invert once the data outgrows the page cache. | 1× read at every worker count |
+| 3 | **The cheapest serial path available.** Quote-free records skip the byte-at-a-time state machine for a `memchr` bulk split, so even `PARALLEL=OFF` beats the two obvious references. | **1.20× upstream `pg_bulkload`**, **1.46× `COPY ... FROM`** |
+| 4 | **It never breaks your semantics silently.** The 13 conditions the parallel path cannot honour fall back to the serial path with one `INFO` line, and a bad row fails the whole load instead of keeping a timing-dependent subset. | [§5](#5-automatic-downgrade), [§6](#6-constraints-you-should-know) |
+| 5 | **Drop-in from pg_bulkload.** Same control-file keywords, same `TYPE` values, same log format, same `WRITER` modes — rename the two identifiers and your `.ctl` files keep working. | [§2.3](#23-usage) |
+| 6 | **Both directions, one engine.** `pgfastload.pg_fastload_export()` writes a table (or any `SELECT`) to CSV / BINARY / FIXED through the same Writer and the same `COL`/`OUT_COL` layout, so a fixed-width file loads back unchanged. | **9.60×** parallel export; CSV byte-identical to `COPY ... TO` |
+
+### Feature checklist
+
+**Loading**
+
+- CSV, fixed-length (`BINARY` / `FIXED`), and the upstream `TUPLE` / `FUNCTION` input formats.
+- `PARALLEL=ON` with `PARALLEL_WORKERS=1..64` (default = online CPUs − 1); parallel CSV *and* parallel fixed length.
+- The upstream writer modes untouched: `WRITER=DIRECT` / `BUFFERED` / `PARALLEL`.
+- `SKIP` / `LIMIT`, `DUPLICATE_*` policies, `FILTER`, `FORCE_NOT_NULL`, `NULLIF`, `ENCODING`, `TRUNCATE=YES`, `MULTI_PROCESS`.
+- Per-row tolerance with `PARSE_ERRORS` + `PARSE_BADFILE` (serial path; see [§6](#6-constraints-you-should-know)).
+
+**Export**
+
+- `pgfastload.pg_fastload_export()` with `TABLE=` or `QUERY=`, `TYPE=CSV / BINARY / FIXED`, `OUT_COL`, `HEADER`, `LIMIT`, `DELIMITER` / `QUOTE` / `ESCAPE` / `NULL`.
+- Parallel by default for `TABLE=` (N query workers + one writer); `QUERY=` always serial.
+
+**Observability**
+
+- Every load publishes progress; any session reads it through `pgfastload.pg_fastload_progress` (`percent`, byte/row rates, `eta_seconds`), or streams it with `PROGRESS_NOTICE=ON`.
+- `USE_PROFILE=1` builds print stage groups `GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER`, including per-worker `SCAN` / `FORM` / `IPC`.
+- Per-worker row counts plus a `CPU x/y sec elapsed z sec` line in every load log.
+
+**Operations**
+
+- Two equivalent entry points: the `pg_fastload x.ctl` CLI (`-o KEY=VALUE` overrides, `-r` recovery for an interrupted `DIRECT` load) and `pgfastload.pg_fastload(ARRAY[...])`.
+- One `master` branch serves PostgreSQL 15 / 16 / 17 / 18 / 19; the load suite and both export suites (39 + 33 assertions) pass on all five.
+
+---
+
 ## 1. The problem
 
 `pg_bulkload` splits a load into four stages, all executed **serially inside one backend**:
@@ -26,9 +69,9 @@ workers, while the insert stage stays in one process and one transaction.
 | ③ | Form tuples | column input functions → `Datum` → `heap_form_tuple()` |
 | ④ | Insert | `WriterInsert()` (`DIRECT` / `BUFFERED`) |
 
-On a modern multi-core box, ①②③ are pure CPU work (byte-at-a-time state machine, one input
-function per column) and saturate a single core while the rest idle; ④ cannot simply be
-parallelised (see [ARCHITECTURE.md §5](docs/ARCHITECTURE.md)).
+On a modern multi-core box, ①②③ are pure CPU work (one input function per column, plus a quote-aware
+state machine for quoted records and a bulk `memchr` splitter for the rest) and saturate a single core
+while the rest idle; ④ cannot simply be parallelised (see [ARCHITECTURE.md §5](docs/ARCHITECTURE.md)).
 
 `pg_fastload` **hands ①②③ to N worker processes and keeps ④ serial in the backend that
 issued the load**. One load goes from "one process doing four things" to "one reader + N
@@ -38,12 +81,14 @@ parsers + one writing leader".
 
 | Configuration | Time | vs serial |
 |---|---|---|
-| `PARALLEL=OFF` (upstream serial path) | 7.99 s | 1.00× |
-| `PARALLEL=ON, PARALLEL_WORKERS=2` | 3.52 s | 2.27× |
-| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.92 s | 4.16× |
-| `PARALLEL=ON` (15 workers, default) | **1.76 s** | **4.54×** |
+| `PARALLEL=OFF` (upstream serial path) | 5.81 s | 1.00× |
+| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× |
+| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× |
+| `PARALLEL=ON` (15 workers, default) | **1.37 s** | **4.24×** |
 
-Other sizes, the fixed-length format and cold-cache results: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+The serial path is the upstream algorithm with the splitter above, so it is **1.20× upstream
+`pg_bulkload`** and **1.46× `COPY ... FROM`** on the same file. Other sizes, the fixed-length format,
+the reference comparisons and cold-cache results: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ---
 
@@ -65,7 +110,7 @@ Other sizes, the fixed-length format and cold-cache results: [docs/BENCHMARK.md]
 | File reads | one per process on the serial path | always **one**: a single reader scans once and distributes |
 | Transaction semantics | the parallel writer commits separately, so rows become visible before the caller commits | every insert happens inside the caller's transaction, same atomicity as the serial path |
 | How parallelism is exposed | — | **no new `TYPE`**: `PARALLEL=ON` makes `TYPE=CSV / BINARY / FIXED` go parallel |
-| Serial path | original implementation | **bit-for-bit unchanged** (`PARALLEL=OFF` behaves like pg_bulkload) |
+| Serial path | original implementation | **same algorithm, same semantics** (`PARALLEL=OFF` is the upstream loop plus a bulk field splitter, 1.20× upstream) |
 
 ### 2.2 Features
 
@@ -75,7 +120,7 @@ Other sizes, the fixed-length format and cold-cache results: [docs/BENCHMARK.md]
 | Parallel fixed-length (`BINARY` / `FIXED`) loading | ✗ | ✓ |
 | Parallel `TUPLE` / `FUNCTION` | — | ✗ (falls back to serial) |
 | Automatic downgrade with an `INFO` line | — | ✓ (13 cases, see [§5](#5-automatic-downgrade)) |
-| Stage-level profiling | partial | ✓ GLOBAL / PARALLEL / WORKER, including per-worker SCAN/FORM/IPC |
+| Stage-level profiling | partial | ✓ GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER, including per-worker SCAN/FORM/IPC |
 | Skip spool work on unindexed tables | ✗ | ✓ (`SpoolerInsert()` early return, ~0.28 s/1 GiB) |
 | Per-row error tolerance + badfile | ✓ | ✓ (serial path; the parallel path fails the load instead) |
 | Load progress reporting | ✗ | ✓ (published for every load; read it from any session via `pgfastload.pg_fastload_progress` — see [USER_MANUAL §12.4](docs/USER_MANUAL.md#124-load-progress)) |

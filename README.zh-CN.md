@@ -11,6 +11,48 @@
 
 ---
 
+## 一眼看核心
+
+**六件在细节之前就该知道的事。** 所有数字都测自同一个 1 GiB / 737 万行 CSV，16 vCPU、
+热缓存、`DIRECT`、无索引；方法与完整参照组见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
+
+| # | 优势 | 实测 / 保证 |
+|---|---|---|
+| 1 | **并行装载仍然只有一个事务。** ①②③ 交给 N 个后台进程，④ 留在调用方串行：不额外开连接、未提交的行不会被其他会话看到、原子性与串行装载完全一致。 | 15 worker 下 5.81 s → **1.37 s（4.24×）** |
+| 2 | **输入文件只读一遍。** 单个 reader 顺序扫描后分发，worker 从不碰文件；总读取量恒为 1× 文件大小，文件超出 page cache 后加速比也不会倒挂。 | 任意 worker 数下均为 1× 读取 |
+| 3 | **最快的串行路径。** 无引号记录不再走逐字节状态机，改用 `memchr` 批量切分，因此即使 `PARALLEL=OFF` 也快于两个显而易见的参照物。 | **上游 `pg_bulkload` 的 1.20×**、**`COPY ... FROM` 的 1.46×** |
+| 4 | **不会悄悄改变语义。** 并行路径无法保证语义的 13 种情况一律降级到串行并打一行 `INFO`；坏行会让整次装载回滚，而不是留下一个取决于 worker 时序的子集。 | [§5](#5-自动降级清单)、[§6](#6-需要知道的限制) |
+| 5 | **从 pg_bulkload 平滑迁移。** 控制文件关键字、`TYPE` 取值、日志格式、`WRITER` 模式全部保持一致，只改两个标识符，`.ctl` 原样可用。 | [§2.3](#23-使用方式) |
+| 6 | **双向一个引擎。** `pgfastload.pg_fastload_export()` 用同一套 Writer 与 `COL`/`OUT_COL` 布局把表（或任意 `SELECT`）写成 CSV / BINARY / FIXED，定长文件可以直接装回来。 | 并行导出 **9.60×**；CSV 与 `COPY ... TO` 逐字节相同 |
+
+### 功能清单
+
+**装载**
+
+- CSV、定长（`BINARY` / `FIXED`），以及上游的 `TUPLE` / `FUNCTION` 输入格式。
+- `PARALLEL=ON` 配 `PARALLEL_WORKERS=1..64`（默认 = 在线 CPU 核数 − 1）；CSV 与定长**都能并行**。
+- 上游三种写入模式语义不变：`WRITER=DIRECT` / `BUFFERED` / `PARALLEL`。
+- `SKIP` / `LIMIT`、`DUPLICATE_*` 策略、`FILTER`、`FORCE_NOT_NULL`、`NULLIF`、`ENCODING`、`TRUNCATE=YES`、`MULTI_PROCESS`。
+- `PARSE_ERRORS` + `PARSE_BADFILE` 逐行容错（串行路径，见 [§6](#6-需要知道的限制)）。
+
+**导出**
+
+- `pgfastload.pg_fastload_export()`：`TABLE=` 或 `QUERY=`、`TYPE=CSV / BINARY / FIXED`、`OUT_COL`、`HEADER`、`LIMIT`、`DELIMITER` / `QUOTE` / `ESCAPE` / `NULL`。
+- `TABLE=` 默认并行（N 个查询 worker + 1 个写进程）；`QUERY=` 始终串行。
+
+**可观测性**
+
+- 每次装载都会发布进度，任何会话都能通过 `pgfastload.pg_fastload_progress` 读取（`percent`、字节/行速率、`eta_seconds`），或用 `PROGRESS_NOTICE=ON` 直接收 `NOTICE`。
+- `USE_PROFILE=1` 构建会输出 `GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER` 分段，含 worker 侧 `SCAN` / `FORM` / `IPC`。
+- 日志里有每个 worker 的产出行数，以及一行 `CPU x/y sec elapsed z sec`。
+
+**运维**
+
+- 两个等价入口：`pg_fastload x.ctl` 命令行（`-o KEY=VALUE` 覆盖、`-r` 恢复被中断的 `DIRECT` 装载）与 `pgfastload.pg_fastload(ARRAY[...])`。
+- 单条 `master` 分支同时服务 PostgreSQL 15 / 16 / 17 / 18 / 19；装载套件与两个导出套件（39 + 33 个断言）在五个主版本上全部通过。
+
+---
+
 ## 1. 它解决什么问题
 
 `pg_bulkload` 把一次加载拆成四个阶段，全部在**同一个 backend 进程里串行**执行：
@@ -22,8 +64,9 @@
 | ③ | 形成元组 | 列输入函数 → `Datum` → `heap_form_tuple()` |
 | ④ | 写入数据库 | `WriterInsert()`（DIRECT / BUFFERED） |
 
-在现代多核机器上，①②③ 是纯 CPU 工作（逐字节状态机 + 逐字段输入函数），
-单核跑满而其他核空闲；④ 无法轻易并行（见 [ARCHITECTURE.md §9](docs/ARCHITECTURE.md#9-为什么-④-保持串行)）。
+在现代多核机器上，①②③ 是纯 CPU 工作（逐字段输入函数，带引号记录走带引号状态机、
+其余记录走 `memchr` 批量切分），单核跑满而其他核空闲；④ 无法轻易并行（见
+[ARCHITECTURE.md §9](docs/ARCHITECTURE.md#9-为什么-④-保持串行)）。
 
 `pg_fastload` 的做法是：**把 ①②③ 拆给 N 个后台进程并行做，④ 仍由发起加载的 backend 串行做**。
 一次加载的进程结构从「1 个进程干 4 件事」变成「1 个 reader 读 + N 个 worker 解析 + 1 个 leader 写」。
@@ -32,12 +75,14 @@
 
 | 配置 | 耗时 | 相对串行 |
 |---|---|---|
-| `PARALLEL=OFF`（原版串行路径） | 7.99 s | 1.00× |
-| `PARALLEL=ON, PARALLEL_WORKERS=2` | 3.52 s | 2.27× |
-| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.92 s | 4.16× |
-| `PARALLEL=ON`（默认 15 worker） | **1.76 s** | **4.54×** |
+| `PARALLEL=OFF`（原版串行路径） | 5.81 s | 1.00× |
+| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× |
+| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× |
+| `PARALLEL=ON`（默认 15 worker） | **1.37 s** | **4.24×** |
 
-全量数据与更大/更小规模、定长格式、冷缓存的结果见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
+串行路径就是上游算法加上批量切分，因此同一文件上是上游 `pg_bulkload` 的 **1.20×**、
+`COPY ... FROM` 的 **1.46×**。全量数据与更大/更小规模、定长格式、参照对比、冷缓存的结果见
+[docs/BENCHMARK.md](docs/BENCHMARK.md)。
 
 ---
 
@@ -58,7 +103,7 @@
 | 文件读取次数 | 每进程各读一遍（串行路径 1 次） | 恒为 **1 次**：单个 reader 单遍扫描后分发 |
 | 事务语义 | 并行 writer 用独立事务，调用方提交前数据已对外可见 | 全部插入都在调用方事务内，与串行路径原子性一致 |
 | 类型暴露方式 | — | **不新增 TYPE**：`PARALLEL=ON` 时 `TYPE=CSV / BINARY / FIXED` 自动走并行 |
-| 串行路径 | 原始实现 | **逐位保持不变**（`PARALLEL=OFF` 与 pg_bulkload 行为一致） |
+| 串行路径 | 原始实现 | **同一算法、同一语义**（`PARALLEL=OFF` 即上游循环 + 批量字段切分，1.20× 于上游） |
 
 ### 2.2 功能特性
 
@@ -68,7 +113,7 @@
 | 定长（`BINARY` / `FIXED`）并行加载 | ✗ | ✓ |
 | `TUPLE` / `FUNCTION` 并行 | — | ✗（自动降级串行） |
 | 不支持的语义自动降级 + INFO 提示 | — | ✓（13 类，见 [§5](#5-自动降级清单)） |
-| 阶段级耗时剖析（profile） | 部分阶段 | ✓ GLOBAL / PARALLEL / WORKER 全阶段，含 worker 侧 SCAN/FORM/IPC |
+| 阶段级耗时剖析（profile） | 部分阶段 | ✓ `GLOBAL` / `READER` / `CSV` / `WRITER` / `MERGE` / `PARALLEL` / `WORKER` 全阶段，含 worker 侧 SCAN/FORM/IPC |
 | 无索引表的 spool 空转消除 | ✗ | ✓（`SpoolerInsert()` 早退，省 ~0.28 s/1 GiB） |
 | 逐行容错 + badfile | ✓ | ✓（串行路径；并行路径按失败处理，见限制） |
 | 装载进度显示 | ✗ | ✓（每个装载默认发布，任何会话读 `pgfastload.pg_fastload_progress` 视图即可，见 [§4.5](#45-观察长装载的进度)） |

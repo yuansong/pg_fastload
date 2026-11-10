@@ -71,6 +71,9 @@ instr_time prof_fini;
 instr_time prof_reader_source;
 instr_time prof_reader_parser;
 
+instr_time prof_csv_split;
+instr_time prof_csv_value;
+
 instr_time prof_writer_toast;
 instr_time prof_writer_table;
 instr_time prof_writer_index;
@@ -107,6 +110,7 @@ FASTLOAD_PROFILE_PRINT()
 	double	seconds[10];
 	const char *GLOBALs[] = { "INIT", "READER", "WRITER", "RESET", "FLUSH", "MERGE", "INDEX", "REINDEX", "FINI", "PARALLEL" };
 	const char *READERs[] = { "SOURCE", "PARSER" };
+	const char *CSVs[] = { "SPLIT", "VALUE" };
 	const char *WRITERs[] = { "TOAST", "TABLE", "INDEX" };
 	const char *MERGEs[] = { "UNIQUE", "INSERT", "TERM" };
 	const char *PARALLELs[] = { "SETUP", "WAIT", "COPY", "WRITE", "READ" };
@@ -131,6 +135,12 @@ FASTLOAD_PROFILE_PRINT()
 	seconds[i++] = INSTR_TIME_GET_DOUBLE(prof_reader_source);
 	seconds[i++] = INSTR_TIME_GET_DOUBLE(prof_reader_parser);
 	print_profiles("READER", i, READERs, seconds);
+
+	/* CSV */
+	i = 0;
+	seconds[i++] = INSTR_TIME_GET_DOUBLE(prof_csv_split);
+	seconds[i++] = INSTR_TIME_GET_DOUBLE(prof_csv_value);
+	print_profiles("CSV", i, CSVs, seconds);
 
 	/* WRITER */
 	i = 0;
@@ -219,6 +229,8 @@ pg_fastload(PG_FUNCTION_ARGS)
 	 * the static accumulators must not carry over between them.
 	 */
 	INSTR_TIME_SET_ZERO(prof_parallel);
+	INSTR_TIME_SET_ZERO(prof_csv_split);
+	INSTR_TIME_SET_ZERO(prof_csv_value);
 	prof_par_setup = prof_par_wait = prof_par_copy = prof_par_write = 0.0;
 	prof_par_read = prof_par_scan = prof_par_form = prof_par_ipc = 0.0;
 #endif

@@ -94,13 +94,17 @@ Conclusion summary (1 GiB CSV, warm cache, median of 3 rounds, DIRECT, no index)
 
 | Config | Time | vs serial |
 |---|---|---|
-| `PARALLEL=OFF` | 7.99 s | 1.00× |
-| `w=1` (serial fallback) | 7.97 s | 1.00× |
-| `w=2` | 3.52 s | 2.27× |
-| `w=4` | 1.92 s | 4.16× |
-| `w=8` | 1.76 s | 4.54× |
-| `w=15` | 1.74 s | 4.59× |
-| `auto` (default 15) | 1.76 s | 4.54× |
+| `PARALLEL=OFF` | 5.81 s | 1.00× |
+| `w=1` (serial fallback) | 5.80 s | 1.00× |
+| `w=2` | 2.76 s | 2.11× |
+| `w=4` | 1.58 s | 3.68× |
+| `w=8` | 1.40 s | 4.15× |
+| `auto` (default 15) | 1.37 s | 4.24× |
+
+Against the two reference implementations, same file and same empty table: `PARALLEL=OFF` 5.81 s vs
+upstream `pg_bulkload 3.1.23` 7.00 s (**1.20×**) and vs `COPY ... FROM` 8.48 s (**1.46×**, and 1.32×
+against `COPY` into an UNLOGGED table). Serial equivalence was re-established before the Round 8 change
+(6.95 s vs 7.09 s, 2%), so the gap is the optimisation, not a behavioural difference.
 
 Fixed-width 1 GiB: serial 1.62 s → fastest parallel 0.89 s (w=8, **1.82×**).
 Under a good window with cold cache (evicted via `posix_fadvise`), it beats serial by up to 4.9×.
@@ -149,6 +153,7 @@ false 5.58× speedup; `TRUNCATE` and `pg_fastload()` cannot be in the same `psql
 | Fixed-width parallelism (Round 5) | BINARY/FIXED connected to the single-read multi-decode pipeline | Fixed-width 44/44 + CSV 90/90; fixed-width 1 GiB 1.62→0.89 s (1.82×); 7-config digests match |
 | W-3a (Round 6) | `SpoolerInsert()` early-exit on no index | CSV 90/90 + fixed-width 44/44; fl_off 8.24→7.91 s, auto 1.87→1.75 s; zero regression on the no-index path |
 | Code cleanup (Round 7) | Dead fields / duplicated logic / aliases / lock critical sections / combination guards | CSV 90/90 + fixed-width 44/44 + MULTI_PROCESS 8/8; 7-config digests match; performance within ±5% fluctuation |
+| Serial CSV bulk split (Round 8) | Quote-free records take a memchr-based splitter in `CSVParserRead()` and in the workers' `fl_parse_fields()`; encoding loop hoisted behind `check_encoding` | CSV 90/90 (incl. quoted / lone-CR / cross-chunk / blank-line / extra-column fallbacks) + fixed-width 44/44; clean build on 15.19/16.15/17.11/18.6/19rc1; fl_off 7.99→5.81 s, auto 1.76→1.37 s; digest `7375042\|9258128314029119699254` on both paths |
 
 The evaluated-but-rejected approaches (using `WRITER=PARALLEL` as the parallelism scheme, WAL/data write batching, parallel page-fill pipeline, parallel B+ tree build) and their evidence are in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches).
 

@@ -40,9 +40,13 @@
 | ③ 形成元组 | 输入函数 → `heap_form_tuple()` | leader 进程 | N 个 worker |
 | ④ 写入 | `WriterInsert()` | leader 进程 | leader 进程（不变） |
 
-**没有 `PARALLEL` 时，行为与 pg_bulkload 完全一致**；打开 `PARALLEL=ON` 后只有 ①②③ 被并行化，
-④ 以及所有事务/约束/错误语义都留在原处。因此 `PARALLEL=ON` 是一个"可以随时打开"的开关：
-不满足条件的场景会自动回到串行路径并打印一条 INFO。
+**没有 `PARALLEL` 时，行为与 pg_bulkload 完全一致** —— 同一个记录循环、同一套选项、同一套错误处理。
+但**速度不再相同**：无引号的记录不再逐字节走状态机（见
+[ARCHITECTURE §6.1a](ARCHITECTURE.zh-CN.md#61a-字段切分两档实现同一语义)），因此在 1 GiB 纯 CSV 上
+串行路径约为**上游的 1.2×**、**`COPY ... FROM` 的 1.4×**
+（[BENCHMARK §3.1](BENCHMARK.zh-CN.md#31-串行路径对上游对-copy--from)），输出仍是逐位一致。
+打开 `PARALLEL=ON` 后只有 ①②③ 被并行化，④ 以及所有事务/约束/错误语义都留在原处。
+因此 `PARALLEL=ON` 是一个"可以随时打开"的开关：不满足条件的场景会自动回到串行路径并打印一条 INFO。
 
 反方向也有一个入口：`pgfastload.pg_fastload_export()` 把表或任意 `SELECT` 的结果写成
 CSV / BINARY / FIXED 文件，用的是同一套 Writer 与同一套 `COL`/`OUT_COL` 布局描述，
@@ -584,7 +588,7 @@ TYPE = CSV
 ...
 worker #0 produced 492013 rows
 ...
-CPU 1.20s/13.40u sec elapsed 1.76 sec
+CPU 1.07s/11.60u sec elapsed 1.37 sec
 ```
 
 | 关注点 | 含义 |
@@ -602,6 +606,7 @@ CPU 1.20s/13.40u sec elapsed 1.76 sec
 |---|---|---|
 | `GLOBAL` | `INIT` / `READER` / `WRITER` / `FLUSH` / `MERGE` / `INDEX` / `FINISH` / `PARALLEL` | 全流程分段；`PARALLEL` 是并行子系统总耗时 |
 | `READER` | `SOURCE` / `PARSER` | 串行路径的读/解析 |
+| `CSV` | `SPLIT` / `VALUE` | 仅串行 CSV：字节 → 字段指针（找记录边界、判引号/回车、就地切分隔符），再 字段指针 → `Datum` + `heap_form_tuple()` |
 | `WRITER` | `TOAST` / `TABLE` / `INDEX` | 写入细分 |
 | `PARALLEL` | `SETUP` / `WAIT` / `COPY` / `WRITE` / `READ` | 编排、等 worker、回传拷贝、写表、reader 扫描 |
 | `WORKER` | `SCAN` / `FORM` / `IPC` | worker 侧取记录 / 成型 / 通信（跨进程汇总） |

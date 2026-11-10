@@ -25,6 +25,16 @@ extern instr_time prof_reindex;
 extern instr_time prof_reader_source;
 extern instr_time prof_reader_parser;
 
+/*
+ * Splitting the parser stage into its two halves: the record scan that turns
+ * bytes into fields (prof_csv_split) and everything that turns fields into
+ * Datums plus heap_form_tuple() (prof_csv_value).  Both are accumulated
+ * inside CSVParserRead() so that the serial path can be attributed without
+ * guessing from wall time.
+ */
+extern instr_time prof_csv_split;
+extern instr_time prof_csv_value;
+
 extern instr_time prof_writer_toast;
 extern instr_time prof_writer_table;
 extern instr_time prof_writer_index;

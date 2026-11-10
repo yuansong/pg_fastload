@@ -13,7 +13,7 @@
 | # | 阶段 | 主要工作 | 代码 |
 |---|---|---|---|
 | ① | 读输入 | `SourceRead()` 从 INPUT 取字节流 | `lib/source.c` → `CSVParserRead()` |
-| ② | 解析记录 | 记录边界状态机 + 字段切分、去引号/转义 | `lib/parser_csv.c` |
+| ② | 解析记录 | 记录边界扫描 + 字段切分、去引号/转义 | `lib/parser_csv.c` |
 | ③ | 形成元组 | `CheckerConversion()` → `TupleFormerValue()`（列输入函数）→ `TupleFormerTuple()`（`heap_form_tuple`） | `lib/reader.c`、`lib/parser_csv.c` |
 | ④ | 写入数据库 | `WriterInsert()`（DIRECT / BUFFERED；`WRITER=PARALLEL` 另起写入进程，见 §14） | `lib/writer_*.c` |
 
@@ -285,6 +285,20 @@ reader 只判断"一条记录到哪结束"，不切字段。状态机带 `in_quo
 - **末条无终止符**：`rec_used > 0` 时补发一条；若此时 `in_quote` 仍为真，报
   `unterminated CSV quoted field`；
 - **跨块长记录**：记录缓冲从 64 KiB 起按需翻倍，上限 `FL_REC_MAX = 256 MiB`。
+
+### 6.1a 字段切分：两档实现，同一语义
+
+上面的记录边界只回答「一条记录到哪结束」。把字节变成字段是第二步，这一步有两套输出完全一致的实现：
+
+| 档位 | 触发条件 | 做法 | 每 1 GiB 成本 |
+|---|---|---|---|
+| 快档（串行 `CSVPlainRecord()`，worker `fl_parse_fields_plain()`） | 记录中**既无引号也无 `\r`** | 一次 `memchr('\n')`、一次引号/回车预扫描、把记录整条复制进字段缓冲，随后每个分隔符字节就地改成上一字段的 NUL 结尾 | 0.90 s |
+| 参考档（`CSVParserRead()` 循环 / `fl_parse_fields()` 循环） | 带引号字段、转义引号、引号内 CRLF、lone CR、未闭合引号、`FILTER`、无目标列 | 逐字节状态机，边去引号/反转义边拼字段缓冲 | 1.92 s |
+
+快档从不改动记录缓冲，因此 `ParserDumpRecord()`、`strlen(self->cur)` 判断与缓冲补数据看到的
+仍是原始字节；`field_num`、`parsing_field`、`base.count` 完全复刻，包括「多余列覆盖最后一个
+目标列」与「空行是一个 NULL 字段」。是否可走快档在**改动任何字节之前**判定，这正是回退安全的
+前提（90 项断言集用 quoted / lone-CR / cross-chunk 用例钉住这一点）。
 
 ### 6.2 路由：按字节量分块轮转
 
