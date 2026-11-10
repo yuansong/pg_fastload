@@ -48,7 +48,7 @@ reference set in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 **Observability**
 
-- Every load publishes progress; any session reads it through `pgfastload.pg_fastload_progress` (`percent`, byte/row rates, `eta_seconds`), or streams it with `PROGRESS_NOTICE=ON`.
+- Every load publishes progress; any session reads it through `pgfastload.pg_fastload_progress` (`percent`, byte/row rates, `eta_seconds`), or streams it with `PROGRESS_NOTICE=ON`. Exports use the same view: a `TABLE=` export shows `percent`/`eta_seconds` from the `reltuples` estimate, and the log records the snapshot fingerprint (`xmin/xmax/cid`) for auditability.
 - `USE_PROFILE=1` builds print stage groups `GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER`, including per-worker `SCAN` / `FORM` / `IPC`.
 - Per-worker row counts plus a `CPU x/y sec elapsed z sec` line in every load log.
 

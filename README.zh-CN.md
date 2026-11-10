@@ -43,7 +43,7 @@
 
 **可观测性**
 
-- 每次装载都会发布进度，任何会话都能通过 `pgfastload.pg_fastload_progress` 读取（`percent`、字节/行速率、`eta_seconds`），或用 `PROGRESS_NOTICE=ON` 直接收 `NOTICE`。
+- 每次装载都会发布进度，任何会话都能通过 `pgfastload.pg_fastload_progress` 读取（`percent`、字节/行速率、`eta_seconds`），或用 `PROGRESS_NOTICE=ON` 直接收 `NOTICE`。导出走同一张视图：`TABLE=` 导出按 `reltuples` 估算显示 `percent`／`eta_seconds`，日志记录快照指纹（`xmin/xmax/cid`）便于审计。
 - `USE_PROFILE=1` 构建会输出 `GLOBAL / READER / CSV / WRITER / MERGE / PARALLEL / WORKER` 分段，含 worker 侧 `SCAN` / `FORM` / `IPC`。
 - 日志里有每个 worker 的产出行数，以及一行 `CPU x/y sec elapsed z sec`。
 

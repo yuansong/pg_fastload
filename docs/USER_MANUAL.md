@@ -1095,7 +1095,38 @@ An export publishes into the same view ([§12.4](#124-load-progress)) with `dire
   a parallel export's leader republishes on the same cadence from the writer's
   counters.
 
-### 18.8 Limitations
+### 18.8 Snapshot consistency (concurrent writes, export → load round trip)
+
+Every exported byte comes from **one MVCC snapshot**; a long export is not a
+series of reads that each see a different table.
+
+* **Creation.** The scan uses the caller's active snapshot: in `READ
+  COMMITTED` that is the statement snapshot taken when `pg_fastload_export()`
+  started, in `REPEATABLE READ`/`SERIALIZABLE` the transaction snapshot. Rows
+  committed after that instant are invisible to the export, whichever worker
+  reads which block.
+* **Transfer.** For a parallel export the leader serialises this exact
+  snapshot (`SerializeSnapshot()`) into the DSM segment before launching the
+  workers; every worker restores it (`RestoreSnapshot()` + `PushActiveSnapshot`)
+  instead of taking its own, so N workers + writer all see the same database
+  state — no row is skipped or duplicated at block-range boundaries by a
+  commit happening mid-export.
+* **Lifecycle.** The snapshot lives inside the pinned DSM segment for the
+  duration of the export; workers pop it when they finish and the segment is
+  destroyed when the export ends. A long export keeps the snapshot alive and
+  therefore delays `VACUUM` cleanup past `oldest xmin` ([§18.9](#189-limitations)).
+* **Audit trail.** The export log records the snapshot fingerprint
+  (`snapshot: xmin=… xmax=… cid=…`), so "which snapshot produced this file"
+  is answerable from the `LOGFILE` alone.
+* **The load side needs no snapshot merge.** A load reads a *file* (immutable
+  once written) and holds `AccessExclusiveLock` on the target, so no other
+  session can write the table mid-load; correctness is enforced by the
+  transaction, not by a snapshot. For the export → load round trip, verify
+  byte-level consistency with the order-independent digest
+  (`count(*) || sum(hash_record_extended(t,0))`) on both sides —
+  [VERIFICATION §5](VERIFICATION.md) shows the procedure.
+
+### 18.9 Limitations
 
 1. **Row order is not preserved** by a parallel export (the default for `TABLE=`) — see
    [§18.6](#186-parallel-export-default-for-table). Use `PARALLEL=OFF` / `QUERY=`, or sort after

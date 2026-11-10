@@ -801,6 +801,26 @@ time). Users who plan to rebuild anyway can now pass `SKIP_INDEX=ON`:
   `DUP_ERRORS` — both need the unique indexes that `SKIP_INDEX` drops. A no-op `ON_DUPLICATE`
   default is fine. Tables without indexes load unchanged (`INFO` says nothing was dropped).
 
+## 23. Export progress `percent`/`eta_seconds` + snapshot audit trail (2026-11-10)
+
+- `ProgressInfo` gains `total_rows_hint`. `pg_fastload_export()` fills it from
+  `pg_class.reltuples` for `TABLE=` exports (serial path opens the relation briefly for
+  `AccessShareLock`; the parallel path reuses the already-open `rel->rd_rel->reltuples`);
+  `QUERY=` exports keep it 0 (no estimate possible). `ProgressInit()` now prefers a finite
+  `LIMIT`, then the hint, so the existing percent-by-rows and ETA logic in `progress.c`
+  lights up for exports with zero new parameters. The view clamps the running percentage at
+  99.9% since `reltuples` is only an estimate; the closing line is always `100.0% | done`.
+- The export log now records the snapshot fingerprint (`snapshot: xmin=… xmax=… cid=…`), making
+  "which MVCC snapshot produced this file" answerable from the `LOGFILE` alone. The snapshot
+  semantics themselves (one snapshot, serialized into DSM for parallel workers, pinned for the
+  export's lifetime) were already correct — see USER_MANUAL §18.8.
+
+### 23.1 Verification
+
+`verify_skipindex_export.py` **20/20** (drop + NOTICE + DDL round trip + digest match,
+conflict guard, no-index no-op, percent/ETA NOTICE stream, QUERY= keeps percent NULL), plus the
+standard regressions `fastload_verify.py` **90/90** and `fastload_verify_fixed.py` **44/44**.
+
 ---
 
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

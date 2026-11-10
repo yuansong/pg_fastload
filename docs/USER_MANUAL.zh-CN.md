@@ -1041,7 +1041,29 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 * 刷新节奏由 `PROGRESS_INTERVAL` 控制（默认 1000 ms，最小 100 ms）；并行导出由
   leader 按同一节奏从 writer 计数器重发布。
 
-### 18.8 限制
+### 18.8 快照一致性（并发写入、导出 → 回灌闭环）
+
+导出的每个字节都来自**同一个 MVCC 快照**；一次长导出不是"每次读到不同表内容"的
+一系列读取。
+
+* **创建**：扫描使用调用方的活动快照——`READ COMMITTED` 下是 `pg_fastload_export()`
+  启动时的语句快照，`REPEATABLE READ`／`SERIALIZABLE` 下是事务快照。该时点之后提交的
+  行对导出不可见，无论哪个进程读到哪个块。
+* **传递**：并行导出时 leader 在拉起工作进程前把这份快照原样序列化（`SerializeSnapshot()`）
+  进 DSM 段；每个进程恢复它（`RestoreSnapshot()` + `PushActiveSnapshot`）而不是自取快照，
+  N 个进程加 writer 看到的是同一数据库状态——导出中途的提交不会让块边界上的行被跳过或重复。
+* **生命周期**：快照存活于被 pin 住的 DSM 段中直至导出结束；进程结束时弹出，导出结束
+  时段被销毁。长导出会让快照一直存活，从而推迟 `VACUUM` 越过 `oldest xmin`
+  （见 [§18.9](#189-限制)）。
+* **可审计**：导出日志记录快照指纹（`snapshot: xmin=… xmax=… cid=…`），"这份文件
+  是哪个快照产的"只凭 `LOGFILE` 即可回答。
+* **装载端无需快照合并**：装载读的是*文件*（写完即不可变），并对目标表持
+  `AccessExclusiveLock`，装载期间没有其他会话能写这张表；正确性由事务保证，
+  不依赖快照。导出 → 回灌闭环可用顺序无关摘要
+  （`count(*) || sum(hash_record_extended(t,0))`）在两端核对字节级一致性——
+  流程见 [VERIFICATION §5](VERIFICATION.zh-CN.md)。
+
+### 18.9 限制
 
 1. **行序不保证**：并行导出（`TABLE=` 的默认行为）按到达顺序落盘，见 [§18.6](#186-并行导出table-的默认行为)；
    需要顺序用 `PARALLEL=OFF`／`QUERY=`，或回灌后排序。

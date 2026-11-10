@@ -49,6 +49,7 @@
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/portal.h"
+#include "utils/snapmgr.h"
 #include "utils/timestamp.h"	/* TimestampTzGetDatum (PG 19 no longer pulls it in) */
 
 #include "binary.h"
@@ -149,6 +150,21 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 	start = timeval_to_cstring(ru0.tv);
 	LoggerLog(INFO, "\npg_fastload export %s on %s\n\n",
 			  PG_FASTLOAD_VERSION, start);
+
+	/*
+	 * Audit line: every byte of this file comes from exactly one MVCC
+	 * snapshot.  The serial path reads through the caller's active snapshot
+	 * (read-only SPI cursor); the parallel path serialises that same snapshot
+	 * into the DSM segment and every worker restores it (lib/export_parallel.c).
+	 * Recording xmin/xmax/cid makes "which snapshot produced this file"
+	 * answerable from the log alone.
+	 */
+	{
+		Snapshot	snap = GetActiveSnapshot();
+
+		LoggerLog(INFO, "snapshot: xmin=%u xmax=%u cid=%u\n",
+				  snap->xmin, snap->xmax, snap->curcid);
+	}
 
 	DumpExportParams(&eo, wt, query);
 
