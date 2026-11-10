@@ -13,22 +13,26 @@
 
 ## 1. Support matrix
 
-| Major | Verified minor | Branch | Status |
-|---|---|---|---|
-| 15 | 15.19 | `REL_15_STABLE` | build + functional suite pass |
-| 16 | 16.15 | `REL_16_STABLE` | build + functional suite pass |
-| 17 | 17.11 | `REL_17_STABLE` | build + functional suite pass |
-| 18 | 18.6 (`REL_18_STABLE`, HEAD `1da6ddbdc3`) | `REL_18_STABLE` (main) | build + functional suite pass; benchmark numbers come from this major |
-| 19 | 19rc1 (`REL_19_STABLE`) | `REL_19_STABLE` | build + functional suite pass |
+| Major | Verified minor | Status |
+|---|---|---|
+| 15 | 15.19 | build + functional suite pass |
+| 16 | 16.15 | build + functional suite pass |
+| 17 | 17.11 | build + functional suite pass |
+| 18 | 18.6 (HEAD `1da6ddbdc3`) | build + functional suite pass; benchmark numbers come from this major |
+| 19 | 19rc1 | build + functional suite pass |
 
-Branch policy:
+Branch policy: **one branch, `master`.**
 
-- `REL_18_STABLE` is the main development branch; new work lands there first;
-- `REL_1x_STABLE` is a **snapshot that was verified on that major**. Its README header states which
-  major and which minor it was tested against;
-- because the differences are expressed as `PG_VERSION_NUM` branches, the code on every branch is
-  identical to the main branch. The point of a branch is "this snapshot was verified here", not
-  "one implementation per major" — so a bug fix is written once.
+- Every supported major is built from the same tree. There is no `REL_1x_STABLE` per-major branch and
+  no cherry-picking between majors: a fix is written once and reaches all five.
+- All version differences are resolved at compile time — `#if PG_VERSION_NUM` branches plus the
+  version-pinned nbtree builder listed in §3.1. Nothing is selected at run time or by build flags
+  you have to remember.
+- `include/pg_fastload.h` refuses anything below 15 with `#error`. An unsupported major therefore
+  fails at compile time, instead of producing a binary that breaks later.
+- The five per-major branches that earlier releases published were pointers to one and the same
+  commit; they carried no code difference. They were removed in favour of `master` (see
+  [CHANGES.md](CHANGES.md) §19).
 
 ## 2. Building
 
@@ -126,7 +130,7 @@ path produces byte-for-byte the same content as the serial path.
 - **Parallel index build (W-3) is not implemented**, independent of the server version: with
   indexes present the index build still runs serially in the leader. See the rejected-ideas
   section of [OPTIMIZATION.md](OPTIMIZATION.md).
-- **PostgreSQL 19 is a pre-release** (`19rc1`). The port targets `REL_19_STABLE`; if nbtree
+- **PostgreSQL 19 is a pre-release** (`19rc1`). The port targets PostgreSQL 19 (`REL_19_STABLE`); if nbtree
   internals change again before GA, `lib/nbtree/nbtsort-19.c` must be re-reviewed.
 - Majors below 15 still have `#if` branches in the source but are **not tested** by this project
   and are not claimed as supported.

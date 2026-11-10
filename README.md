@@ -378,8 +378,9 @@ Downgrading is a **safety net, not an error**: `PARALLEL=ON` is always safe to e
 - **Verified on**: PostgreSQL 15.19 / 16.15 / 17.11 / 18.6 / 19rc1, x86_64 Linux, 16 vCPU. All five
   majors were run through the same functional suite (`util/fl_ver_test.sh`): serial vs parallel CSV,
   serial vs parallel fixed length, the `FILTER` downgrade, parse-error handling and the CLI client.
-  Every difference and its fix is listed in [docs/PORTING.md](docs/PORTING.md); each major has
-  a matching `REL_1x_STABLE` branch.
+  Every difference and its fix is listed in [docs/PORTING.md](docs/PORTING.md). **One branch
+  (`master`) serves all five majors** — version differences are resolved by `PG_VERSION_NUM` at
+  compile time, and `include/pg_fastload.h` rejects anything older than 15 with `#error`.
 - **Attribution**: `COPYRIGHT` is preserved byte for byte and every inherited source file keeps its
   `Copyright (c) ... NTT, Inc.` header. The parallel subsystem is
   Copyright (c) 2026, yuanyuansong, released under the same BSD 3-Clause terms.

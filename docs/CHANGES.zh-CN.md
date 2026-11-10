@@ -418,6 +418,32 @@ NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 1
 1 GiB 装载的跨会话轮询（`_t_view.py`）显示：不在装载的那个会话里，行数从 1.1M 一路涨到 6.5M。
 CSV 90/90、定长 44/44 与多版本验收均不受影响。
 
+## 19. 单分支 master（2026-11-10）
+
+早期版本发布过五个分版本分支 —— `REL_15_STABLE` … `REL_19_STABLE`。它们其实是**同一个提交**的
+指针：`git diff REL_15_STABLE REL_18_STABLE` 为空，任意两支之间都为空。保留它们会让人以为有五个
+开发线，实际上只有一条；一个修复还得推五次才能保持一致。
+
+仓库现在只有 `master` 一个分支，支持范围写在源码里而不是分支名里：
+
+| 文件 | 改动 |
+|---|---|
+| `include/pg_fastload.h` | 原 `PG_VERSION_NUM < 80300` 守卫改为 `< 150000`：15 以下直接 `#error pg_fastload requires PostgreSQL 15 or later`，未经测试的组合不可能静默产出二进制 |
+| `docs/PORTING.md`、`PORTING.zh-CN.md` | 支持矩阵去掉「分支」列；分支约定改写为「只有一个分支 `master`」 |
+| `README.md`、`README.zh-CN.md` | 「每一代主版本有对应的 `REL_1x_STABLE` 分支」改为单分支、差异由 `PG_VERSION_NUM` 收敛 |
+| 交付说明（中英） | 构建章节同步该表述 |
+| `make_fastload_deliverables.py` | 多版本检查改为断言单分支策略，不再断言五个分支名 |
+
+为什么单树够用：15 与 19 之间实际遇到的每处差异本来就是 `#if PG_VERSION_NUM` 分支
+（[PORTING.md](PORTING.md) §3 列了约 30 处），加上由同一个宏选中的按版本内置 nbtree 构建器。
+没有任何运行期选择，除 `PG_CONFIG` 外不需要记住额外编译开关。
+
+验证方式：用 `git archive` 导出 `master`（不借助工作区），再从该导出目录逐版本编译 ——
+15.19 / 16.15 / 17.11 / 18.6 / 19rc1 全部 `INSTALL_OK`，`CREATE EXTENSION` 成功，同一文件串行与
+`PARALLEL=ON` 装载的内容摘要一致，进度视图存在。证据：`compat_master_pg1x.out`。
+
+五个分版本分支已从本地与远端删除；GitHub 默认分支为 `master`。
+
 ---
 
 *未采纳方案汇总见 [OPTIMIZATION.zh-CN.md](OPTIMIZATION.zh-CN.md#八未采纳方案汇总)；性能数据见

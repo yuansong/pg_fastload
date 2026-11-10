@@ -175,6 +175,12 @@ The evaluated-but-rejected approaches (using `WRITER=PARALLEL` as the parallelis
 For PostgreSQL **15.19 / 16.15 / 17.11 / 19rc1**, the **acceptance** testing was performed with "separate cluster + separate build" for each,
 the script being [`util/fl_ver_test.sh`](../util/fl_ver_test.sh) (for 18.6, see §3–§5).
 
+All five majors are built from **one tree, branch `master`**: every difference is a `PG_VERSION_NUM`
+branch, and majors below 15 are rejected at compile time. Re-confirmed on 2026-11-10 by exporting
+`master` with `git archive` and building each major from that export (`INSTALL_OK` on all five,
+`CREATE EXTENSION` and a serial-vs-parallel digest comparison on each); evidence
+`compat_master_pg1x.out`.
+
 | Environment | Value |
 |---|---|
 | Build | In-tree `make clean && make && make install`, with `PG_CONFIG` pointing to the target version prefix |

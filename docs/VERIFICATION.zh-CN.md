@@ -182,6 +182,10 @@ bgworker 真启动（日志有 `PARALLEL=ON, TYPE=CSV, workers=N` 且无 `PARALL
 对 PostgreSQL **15.19 / 16.15 / 17.11 / 19rc1** 分别做"独立集群 + 独立构建"的验收，
 脚本为 [`util/fl_ver_test.sh`](../util/fl_ver_test.sh)（18.6 的验证见 §3–§5）。
 
+五个主版本共用**同一份代码、同一个分支 `master`**：所有差异都是 `PG_VERSION_NUM` 分支，15 以下
+在编译期即被拒绝。2026-11-10 用 `git archive` 导出 `master` 后逐版本重新构建确认（五个版本
+`INSTALL_OK`，各自 `CREATE EXTENSION` 并做串行/并行摘要比对）；证据 `compat_master_pg1x.out`。
+
 | 环境 | 值 |
 |---|---|
 | 构建 | 源码树内 `make clean && make && make install`，`PG_CONFIG` 指向目标版本前缀 |
