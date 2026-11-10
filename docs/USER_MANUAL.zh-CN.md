@@ -821,25 +821,31 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 
 | 环节 | 实现 | 说明 |
 |---|---|---|
-| 取行 | `SPI_cursor_open_with_args(..., read_only)` + `SPI_cursor_fetch()`，每批 1000 行 | 走查询规划器，权限、行可见性、快照与普通 `SELECT` 完全一致 |
-| 格式化 | `CsvWriter`（`lib/writer_csv.c`）或 `BinaryWriter`（`lib/writer_binary.c`） | 4 MiB 缓冲，`close()` 时 `fsync` |
-| 写文件 | 以**数据库服务端**身份 `open()`，路径必须是绝对路径 | `OUTPUT` 已存在则直接报错，绝不覆盖 |
-| 并发 | 单进程串行 | 见 18.7：源是游标、目标是单文件，没有可并行的读放大 |
+| 取行 | `TABLE=` + `PARALLEL=ON`：N 个后台工作进程，各自用 `heap_setscanlimits()` 认领一段 `ctid` 块区间 | 块区间是物理的，所以分片先于启动就确定，运行期无需任何协调 |
+| 取行 | `QUERY=`、`PARALLEL=OFF`，或表太小不值得拆分：`SPI_cursor_open_with_args(..., read_only)` + `SPI_cursor_fetch()`，每批 1000 行 | 走查询规划器，权限、行可见性、快照与普通 `SELECT` 完全一致 |
+| 格式化 | `CsvWriter`（`lib/writer_csv.c`）或 `BinaryWriter`（`lib/writer_binary.c`） | 工作进程里写进 `StringInfo` 缓冲，每 256 KiB / 4096 行发一条消息 |
+| 写文件 | 一个专职写文件进程：以**数据库服务端**身份 `open()`，路径必须是绝对路径 | `OUTPUT` 已存在则直接报错，绝不覆盖；4 MiB 缓冲，关闭时 `fsync` |
+| 并发 | `TABLE=` 默认并行；`QUERY=` 始终串行 | 见 [§18.6](#186-并行导出table-的默认行为) |
 
 `TABLE=` 在内部展开为 `SELECT * FROM <table>`；要过滤、排序或只导部分列，用 `QUERY=`。
 两者互斥，必须给一个。
+
+并行导出**不保证行序**。输出是这张表的完整合法转储，但行的先后取决于各工作进程谁先完成——
+这是「没有共享队列、没有逐行协调」的代价。需要顺序时用 `QUERY=`（始终串行），或在重新装载后自行排序。
 
 ### 18.2 关键字
 
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
 | `TABLE=` | 关系名 | — | 源表，与 `QUERY=` 二选一 |
-| `QUERY=` | 任意 `SELECT` | — | 只读游标，`UPDATE`/`DELETE` 会被拒绝（`cannot open UPDATE query as cursor`） |
+| `QUERY=` | 任意 `SELECT` | — | 只读游标，`UPDATE`/`DELETE` 会被拒绝（`cannot open UPDATE query as cursor`）；始终串行 |
 | `OUTPUT=` | 绝对路径 | **必填** | 输出文件 |
 | `TYPE=` | `CSV` / `BINARY` / `FIXED` | `CSV` | `BINARY`/`FIXED` 是定长布局，必须给 `OUT_COL` |
 | `OUT_COL=` | 类型声明，可重复 | — | 一个输出列一个，顺序与查询输出列一致；语法与装载的 `COL` 完全相同 |
 | `DELIMITER=` `QUOTE=` `ESCAPE=` `NULL=` `HEADER=` | 单字符 / 布尔 | `,` `"` `"` 空串 `OFF` | 仅 `TYPE=CSV`，语义与 `COPY ... (FORMAT csv)` 一致 |
-| `LIMIT=` | ≥ 1 | 不限 | 最多写多少行 |
+| `LIMIT=` | ≥ 1 | 不限 | 最多写多少行（行数精确，但并行时是哪些行不确定） |
+| `PARALLEL=` | `ON` / `OFF` | `ON` | 把 `TABLE=` 导出分摊到多个查询进程 |
+| `PARALLEL_WORKERS=` | 1..64 | 在线 CPU 数 − 1 | 工作进程数；给 `1` 即走串行路径 |
 | `LOGFILE=` | 绝对路径 | `<OUTPUT>.log` | 导出日志 |
 | `PROGRESS=` | `ON` / `OFF` | `ON` | 发布 `direction=export` 的进度记录 |
 | `PROGRESS_NOTICE=` | `ON` / `OFF` | `OFF` | 额外输出 `NOTICE` 进度行 |
@@ -854,14 +860,18 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
   'TABLE=public.lineitem',
   'OUTPUT=/data/lineitem.csv',
   'TYPE=CSV',
-  'HEADER=ON']);
+  'HEADER=ON',
+  'PARALLEL=OFF']);      -- 要逐字节比对，必须走串行路径
 ```
 
 ```
-$ psql -c "\copy public.lineitem TO '/tmp/copy.csv' WITH (FORMAT csv, HEADER)"
+$ psql -c "COPY public.lineitem TO '/tmp/copy.csv' WITH (FORMAT csv, HEADER)"
 $ cmp /tmp/copy.csv /data/lineitem.csv && echo identical
 identical
 ```
+
+逐字节相同只对**串行**路径成立（`PARALLEL=OFF` 或 `QUERY=`）。并行导出写出的行集完全相同但顺序不同，
+只能按多重集比较，见 [§18.6](#186-并行导出table-的默认行为)。
 
 引号规则逐条复刻 `CopyAttributeOutCSV()`：字段含 `DELIMITER`／`QUOTE`／`ESCAPE`／`\n`／`\r`
 时整体加引号并把 `QUOTE` 双写；字段内容等于 `NULL` 串时也加引号（否则无法与 NULL 区分）；
@@ -870,10 +880,11 @@ identical
 
 - `HEADER=ON` 写一行列名（来自结果行的 `TupleDesc`，`QUERY=` 里的表达式列可能叫 `?column?`）。
 - 空表 + 无 `HEADER` → 0 字节文件；空表 + `HEADER=ON` → 只有表头一行。
-- 吞吐：800 万行 / 312 MiB 的表，热缓存下导出 0.90 s（≈363 MB/s、8.9M 行/s）；同一张表的服务端
-  `COPY TO` 是 0.80 s，输出 `cmp` 相同。导出是单进程、CPU 受限在**一个后端**里 —— 约 0.48 s 花在
-  每行的游标/deform/内存上下文开销、0.40 s 文本格式化、0.04 s 落盘 —— 其余核用不上。
-  分解见 [BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
+- 吞吐：800 万行 / 312 MiB 的表，热缓存下串行导出 0.90 s（≈363 MB/s、8.9M 行/s）；同一张表的服务端
+  `COPY TO` 是 0.80 s，输出 `cmp` 相同。串行导出 CPU 受限在**一个后端**里 —— 约 0.48 s 花在每行的
+  游标/deform/内存上下文开销、0.40 s 文本格式化、0.04 s 落盘 —— 这正是 `PARALLEL=ON`（默认）分摊到
+  多个进程的部分。分解与并行扩展曲线见
+  [BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
 
 ### 18.4 BINARY / FIXED：定长布局与样例控制文件
 
@@ -939,7 +950,57 @@ COL = INTEGER (4)
 宽度与取值范围在写之前校验：`value too long for type character(n)`、无符号类型的上界都会
 在对应的行上抛错，整条语句回滚，文件留下已写入的部分（`LOGFILE` 里有失败的列号）。
 
-### 18.6 进度
+### 18.6 并行导出（`TABLE=` 的默认行为）
+
+导出在一个后端里是 CPU 受限的：800 万行的参照表上，约 0.48 s 花在逐行游标/解构、0.40 s 花在文本
+格式化、只有 0.04 s 是真正写文件。后一项不可压缩，所以导出把装载的进程模型反向搬了过来：
+**N 个查询进程负责格式化，1 个专职写文件进程负责落盘。**
+
+```
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV',
+  'PARALLEL=ON',              -- 默认值；PARALLEL=OFF 走串行
+  'PARALLEL_WORKERS=8']);     -- 默认：在线 CPU 数 - 1
+```
+
+| 角色 | 做什么 | 不做什么 |
+|---|---|---|
+| 主进程（你的后端） | 建 DSM、启动写进程与查询进程、发布进度、写样例 `.ctl` | 不碰任何一行数据 |
+| 查询进程 × N | 打开表、恢复你的快照、扫自己那段块区间、把行格式化成 256 KiB / 4096 行一块、经 `shm_mq` 发出 | 不打开输出文件 |
+| 写进程 × 1 | `O_CREAT\|O_EXCL` 打开 `OUTPUT`，按到达顺序追加每一块，`fsync`，回报行数与字节数 | 不解析、不格式化、不解压 |
+
+每个查询进程拥有**互不相交的一段 `ctid` 块区间**（`heap_setscanlimits()`），分片在启动前就算好，
+运行期不需要共享队列、不需要任务窃取、数据通路上没有锁。写进程除了一个接收缓冲不分配任何东西：
+一块数据就是「字节流 + `{nrows, nbytes}`」，所以 `TYPE=CSV` 和 `TYPE=BINARY` 共用同一个写进程。
+
+**不保证行序。** 各进程把自己那段的产出直接追加，写进程按到达顺序落盘，因此同一张表导两次可能得到
+内容相同、顺序不同的两个文件。这是契约而不是缺陷：它正是数据通路无锁的原因。需要顺序时用 `QUERY=`
+（始终串行），或回灌后再排序。串行与并行的输出不能 `cmp`，要按行集或内容摘要比较。
+
+`LIMIT=` 仍然精确。各进程用 `pg_atomic_fetch_add_u64` 抢占共享预算，最后一个进程把本块裁到剩余额度，
+所以 `LIMIT=1000` 一定只写 1000 行 —— 但并行时**是哪 1000 行**不确定。
+
+自动回退串行路径（导出日志里记 `PARALLEL disabled (<原因>)`，不报错）：
+
+| 条件 | 日志原因 |
+|---|---|
+| `QUERY=` | `QUERY= cannot be split by block range` |
+| `PARALLEL=OFF` 或 `PARALLEL_WORKERS=1` | `workers=1` |
+| 表不足 32 个块 | `the table is too small` |
+| 每个进程不足 16 个块 | 不报错，改为调小进程数 |
+| 源是视图 / 分区父表 / 外部表，或带引号的名字 | `"..." is not a plain table` |
+| 关系名解析不到 | `relation "..." not found` |
+
+`max_worker_processes` 必须 ≥ `N + 1`（N 个查询进程加 1 个写进程）；启动失败降级为串行，不会让导出失败。
+
+前提：库里必须已 `CREATE EXTENSION pg_fastload`（工作进程由该扩展注册），调用者必须是超级用户
+（与任何服务端写文件操作一样）。
+
+吞吐与扩展曲线见 [BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
+
+### 18.7 进度
 
 导出与装载用同一张视图（[§12.4](#124-加载进度)），记录里 `direction = export`、
 `infile` 是输出文件、`bytes_read` 是已写出的字节数。因为不知道总量，`percent` 与 `eta_seconds`
@@ -951,16 +1012,17 @@ COL = INTEGER (4)
  4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
 ```
 
-### 18.7 限制
+### 18.8 限制
 
-1. **单进程串行**。`PARALLEL` 关键字对导出无效（不报错，也不产生并行）。要做并行导出，
-   用 `COPY` 按分区／范围切成多条语句并发跑。
+1. **行序不保证**：并行导出（`TABLE=` 的默认行为）按到达顺序落盘，见 [§18.6](#186-并行导出table-的默认行为)；
+   需要顺序用 `PARALLEL=OFF`／`QUERY=`，或回灌后排序。
 2. **只读但持快照**：导出在调用方快照下扫描，长导出会拖住 `VACUUM` 的 `oldest xmin`。
 3. **目标文件必须是服务端本地路径、绝对路径、且不存在**。
 4. **需要超级用户**（与装载一致：写文件是服务端行为）。
-5. `TYPE=FIXED` 只支持字符类型；`OUT_COL` 数量必须等于输出列数（CSV 不需要 `OUT_COL`）。
-6. `QUERY=` 只接受单条 `SELECT`（不能带 `;`，不能是 `WITH ... INSERT`）。
-7. 生成样例控制文件的 `OUTPUT` 是文件名，回灌前要改成目标表；样例永远写 `TYPE = BINARY`
+5. **并行导出要求库里装了扩展**（工作进程由 `pg_fastload` 注册），且 `max_worker_processes ≥ N + 1`。
+6. `TYPE=FIXED` 只支持字符类型；`OUT_COL` 数量必须等于输出列数（CSV 不需要 `OUT_COL`）。
+7. `QUERY=` 只接受单条 `SELECT`（不能带 `;`，不能是 `WITH ... INSERT`），且始终串行。
+8. 生成样例控制文件的 `OUTPUT` 是文件名，回灌前要改成目标表；样例永远写 `TYPE = BINARY`
    （`FIXED` 的纯文本布局同样适用）。
 
 ---

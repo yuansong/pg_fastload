@@ -843,25 +843,33 @@ Returns `bigint`: the number of rows written.
 
 | Step | Implementation | Note |
 |---|---|---|
-| Fetch rows | `SPI_cursor_open_with_args(..., read_only)` + `SPI_cursor_fetch()`, 1000 rows per batch | goes through the planner; privileges, visibility and snapshot are those of a plain `SELECT` |
-| Format | `CsvWriter` (`lib/writer_csv.c`) or `BinaryWriter` (`lib/writer_binary.c`) | 4 MiB buffer, `fsync` on `close()` |
-| Write | `open()` as the **server**, absolute path required | an existing `OUTPUT` is an error, never overwritten |
-| Concurrency | single process, serial | see 18.7: the source is a cursor and the target is one file, so there is no read amplification to parallelise |
+| Fetch rows | `TABLE=` + `PARALLEL=ON`: N background workers, each owning a `ctid` block range via `heap_setscanlimits()` | the block range is physical, so the partition is disjoint and needs no runtime coordination |
+| Fetch rows | `QUERY=`, `PARALLEL=OFF`, or a table too small to split: `SPI_cursor_open_with_args(..., read_only)` + `SPI_cursor_fetch()`, 1000 rows per batch | goes through the planner; privileges, visibility and snapshot are those of a plain `SELECT` |
+| Format | `CsvWriter` (`lib/writer_csv.c`) or `BinaryWriter` (`lib/writer_binary.c`) | in a worker: into a `StringInfo` sink, 256 KiB / 4096 rows per message |
+| Write | one dedicated writer process: `open()` as the **server**, absolute path required | an existing `OUTPUT` is an error, never overwritten; 4 MiB buffer, `fsync` on close |
+| Concurrency | parallel by default for `TABLE=`; serial for `QUERY=` | see [§18.6](#186-parallel-export-default-for-table) |
 
 `TABLE=` expands to `SELECT * FROM <table>` internally; use `QUERY=` to filter, sort or project.
 They are mutually exclusive and one is required.
+
+A parallel export **does not preserve row order**. The output is a complete, valid dump of the table,
+but rows appear in the order the workers happened to finish them — that is the price of having no
+shared queue and no per-row coordination. If order matters, use `QUERY=` (always serial) or sort after
+reloading.
 
 ### 18.2 Keywords
 
 | Keyword | Values | Default | Meaning |
 |---|---|---|---|
 | `TABLE=` | relation name | — | source table, alternative to `QUERY=` |
-| `QUERY=` | any `SELECT` | — | read-only cursor; `UPDATE`/`DELETE` are rejected (`cannot open UPDATE query as cursor`) |
+| `QUERY=` | any `SELECT` | — | read-only cursor; `UPDATE`/`DELETE` are rejected (`cannot open UPDATE query as cursor`); always serial |
 | `OUTPUT=` | absolute path | **required** | output file |
 | `TYPE=` | `CSV` / `BINARY` / `FIXED` | `CSV` | `BINARY`/`FIXED` are fixed-width layouts and need `OUT_COL` |
 | `OUT_COL=` | type declaration, repeatable | — | one per output column, in query order; same syntax as the loader's `COL` |
 | `DELIMITER=` `QUOTE=` `ESCAPE=` `NULL=` `HEADER=` | char / boolean | `,` `"` `"` empty `OFF` | `TYPE=CSV` only, same meaning as `COPY ... (FORMAT csv)` |
-| `LIMIT=` | ≥ 1 | unlimited | stop after this many rows |
+| `LIMIT=` | ≥ 1 | unlimited | stop after this many rows (exact count, but which rows is unspecified when parallel) |
+| `PARALLEL=` | `ON` / `OFF` | `ON` | spread a `TABLE=` export over query workers |
+| `PARALLEL_WORKERS=` | 1..64 | online CPUs − 1 | worker count; `1` means the serial path |
 | `LOGFILE=` | absolute path | `<OUTPUT>.log` | export log |
 | `PROGRESS=` | `ON` / `OFF` | `ON` | publish a `direction=export` progress record |
 | `PROGRESS_NOTICE=` | `ON` / `OFF` | `OFF` | additionally emit `NOTICE` progress lines |
@@ -877,14 +885,19 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
   'TABLE=public.lineitem',
   'OUTPUT=/data/lineitem.csv',
   'TYPE=CSV',
-  'HEADER=ON']);
+  'HEADER=ON',
+  'PARALLEL=OFF']);      -- byte-for-byte comparison needs the serial path
 ```
 
 ```
-$ psql -c "\copy public.lineitem TO '/tmp/copy.csv' WITH (FORMAT csv, HEADER)"
+$ psql -c "COPY public.lineitem TO '/tmp/copy.csv' WITH (FORMAT csv, HEADER)"
 $ cmp /tmp/copy.csv /data/lineitem.csv && echo identical
 identical
 ```
+
+Byte identity holds on the **serial** path (`PARALLEL=OFF`, or `QUERY=`). A parallel export writes
+the same rows in a different order, so it is only identical as a multiset — see
+[§18.6](#186-parallel-export-default-for-table).
 
 The quoting rules replicate `CopyAttributeOutCSV()` one by one: a field is quoted when it contains
 `DELIMITER`, `QUOTE`, `ESCAPE`, `\n` or `\r`, and the quote character is doubled inside; a field
@@ -897,10 +910,11 @@ values). By default NULL is written as an empty field; `NULL=\N` separates the t
   may be named `?column?`).
 - Empty table without `HEADER` → 0-byte file; empty table with `HEADER=ON` → just the header line.
 - Throughput: an 8M-row / 312 MiB table exports in 0.90 s from page cache (≈363 MB/s, 8.9M rows/s);
-  server-side `COPY TO` on the same table takes 0.80 s with `cmp`-identical output. The export is
-  single-process and CPU-bound in one backend — roughly 0.48 s of per-row cursor/deform/context
-  overhead, 0.40 s of text formatting, 0.04 s of file writing — so it does not use the other cores.
-  [BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to) has the breakdown.
+  server-side `COPY TO` on the same table takes 0.80 s with `cmp`-identical output. The serial export
+  is CPU-bound in one backend — roughly 0.48 s of per-row cursor/deform/context overhead, 0.40 s of
+  text formatting, 0.04 s of file writing — which is exactly what `PARALLEL=ON` (the default) spreads
+  over workers. [BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to) has both
+  the serial decomposition and the parallel scaling curve.
 
 ### 18.4 BINARY / FIXED: fixed-width layout and a sample control file
 
@@ -971,7 +985,65 @@ Widths and ranges are checked before writing: `value too long for type character
 overflow raise on the offending row, the statement rolls back, and the partially written file stays
 (the `LOGFILE` names the failing column).
 
-### 18.6 Progress
+### 18.6 Parallel export (default for `TABLE=`)
+
+An export is CPU-bound in one backend: on the 8M-row reference table roughly 0.48 s of per-row
+cursor/deform work, 0.40 s of text formatting and 0.04 s of actual file writing. Only the last term is
+irreducible, so the export borrows the loader's process model in the opposite direction: **N query
+workers format rows, one dedicated writer process writes the file.**
+
+```
+SELECT pgfastload.pg_fastload_export(ARRAY[
+  'TABLE=public.lineitem',
+  'OUTPUT=/data/lineitem.csv',
+  'TYPE=CSV',
+  'PARALLEL=ON',              -- default; PARALLEL=OFF for the serial path
+  'PARALLEL_WORKERS=8']);     -- default: online CPUs - 1
+```
+
+| Piece | Does | Does not |
+|---|---|---|
+| leader (your backend) | builds the DSM segment, launches the writer and the workers, publishes progress, writes the sample `.ctl` | touch a row |
+| query worker × N | opens the table, restores your snapshot, scans its own block range, formats rows into 256 KiB / 4096-row chunks, sends them over `shm_mq` | open the output file |
+| writer process × 1 | opens `OUTPUT` (`O_CREAT|O_EXCL`), appends every chunk in arrival order, `fsync`, reports rows/bytes | parse, format, decompress |
+
+Each worker owns a **disjoint range of `ctid` blocks** (`heap_setscanlimits()`), so the split is
+decided before launch and needs no shared queue, no work stealing and no locks on the data path. The
+writer allocates nothing but a receive buffer: a chunk is a byte run plus `{nrows, nbytes}`, so a
+`TYPE=CSV` and a `TYPE=BINARY` export share one writer.
+
+**Row order is not preserved.** Workers append whatever their range yields and the writer appends in
+arrival order, so two exports of the same table can produce different files with the same contents.
+This is the contract, not a defect: it is what keeps the data path lock-free. Use `QUERY=` when order
+matters (always serial), or sort the reloaded table. `cmp`-style checks between a serial and a parallel
+export will fail; compare row sets or a content digest instead.
+
+`LIMIT=` stays exact. Workers reserve slices of a shared budget (`pg_atomic_fetch_add_u64`) and the
+last one truncates its chunk to the remainder, so `LIMIT=1000` writes exactly 1000 rows — but *which*
+1000 rows is unspecified while parallel.
+
+Automatic fallback to the serial path (logged as `PARALLEL disabled (<reason>)` in the export log,
+never an error):
+
+| Condition | Reason text |
+|---|---|
+| `QUERY=` | `QUERY= cannot be split by block range` |
+| `PARALLEL=OFF` or `PARALLEL_WORKERS=1` | `workers=1` |
+| table smaller than 32 blocks | `the table is too small` |
+| fewer than 16 blocks per worker | the worker count is reduced instead |
+| source is a view / partitioned parent / foreign table, or a quoted name | `"..." is not a plain table` |
+| relation cannot be resolved | `relation "..." not found` |
+
+`max_worker_processes` must be at least `N + 1` (N query workers plus the writer); a launch failure
+degrades to the serial path rather than failing the export.
+
+Requirements: `CREATE EXTENSION pg_fastload` must be installed in the database (the workers are
+`pg_fastload` background workers), and the caller must be a superuser, as for any file write.
+
+Throughput and the measured scaling curve are in
+[BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to).
+
+### 18.7 Progress
 
 An export publishes into the same view ([§12.4](#124-load-progress)) with `direction = export`,
 `infile` set to the output file and `bytes_read` counting written bytes. The total is unknown, so
@@ -983,18 +1055,21 @@ An export publishes into the same view ([§12.4](#124-load-progress)) with `dire
  4312 | tpcc    | public.lineitem| export    | CSV        | serial | running | 3687521 |  536870912
 ```
 
-### 18.7 Limitations
+### 18.8 Limitations
 
-1. **Single process, serial.** `PARALLEL` has no effect on an export (no error, no parallelism). For a
-   parallel export, split by partition or key range and run several `COPY` statements concurrently.
+1. **Row order is not preserved** by a parallel export (the default for `TABLE=`) — see
+   [§18.6](#186-parallel-export-default-for-table). Use `PARALLEL=OFF` / `QUERY=`, or sort after
+   reloading, when order matters.
 2. **Read-only, but holds a snapshot**: the scan runs under the caller's snapshot, so a long export
    delays `VACUUM` through `oldest xmin`.
 3. **The output must be a server-side, absolute path that does not exist yet.**
 4. **Superuser required** (same as a load: writing a file is a server-side action).
-5. `TYPE=FIXED` accepts character types only; the number of `OUT_COL` declarations must equal the
+5. **A parallel export needs the extension installed in the database** (the workers are registered by
+   `pg_fastload`) and `max_worker_processes ≥ N + 1`.
+6. `TYPE=FIXED` accepts character types only; the number of `OUT_COL` declarations must equal the
    number of output columns (CSV needs no `OUT_COL`).
-6. `QUERY=` takes a single `SELECT` (no trailing `;`, no `WITH ... INSERT`).
-7. The sample control file's `OUTPUT` is the file name — change it to your target table before
+7. `QUERY=` takes a single `SELECT` (no trailing `;`, no `WITH ... INSERT`) and is always serial.
+8. The sample control file's `OUTPUT` is the file name — change it to your target table before
    reloading. The sample always says `TYPE = BINARY`, which also reads `FIXED` text layouts.
 
 ---

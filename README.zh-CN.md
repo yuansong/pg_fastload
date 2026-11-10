@@ -300,7 +300,7 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 装载是「文件 → 表」，导出是「表 → 文件」，共用同一套 Writer 与 `COL`/`OUT_COL` 布局描述：
 
 ```sql
--- CSV：与 COPY ... TO ... (FORMAT csv) 逐字节相同
+-- CSV：串行路径下与 COPY ... TO ... (FORMAT csv) 逐字节相同
 SELECT pgfastload.pg_fastload_export(ARRAY[
   'TABLE=public.order_line',
   'OUTPUT=/tmp/order_line.csv',
@@ -326,9 +326,14 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 
 - `TABLE` 在这里是**源**，`OUTPUT` 在这里是**文件**（与装载相反）；`QUERY=` 可代替 `TABLE=`；
 - 目标是服务端本地路径、必须绝对路径、已存在则报错，绝不覆盖；需要超级用户；
-- 单进程串行（不接 `PARALLEL`）。800 万行 / 312 MiB 热缓存导出 **0.90 s**（≈363 MB/s），
-  服务端 `COPY TO` 为 0.80 s，两者输出 `cmp` 相同。瓶颈在单后端的 CPU 而不是 I/O，
-  分解见 [BENCHMARK §8](docs/BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)；
+- **`TABLE=` 默认并行**：N 个查询进程负责格式化，1 个专职写进程统一落盘，是装载进程模型的镜像。
+  740 万行 / 1.13 GiB 写 tmpfs：串行 4.08 s → 15 个 worker **0.42 s（9.60×）**；`PARALLEL=OFF`
+  保留单进程路径，`QUERY=` 永远走那条；
+- **并行导出不保证行序**（各 worker 按到达顺序追加）—— 文件是完整转储，不是有序转储。
+  比较时按行集而不是逐字节，需要顺序就用 `QUERY=`；
+- 串行路径仍然是单后端 CPU 受限而不是 I/O 受限：800 万行 / 312 MiB 热缓存 **0.90 s**（≈363 MB/s），
+  服务端 `COPY TO` 为 0.80 s，两者输出 `cmp` 相同。分解与并行扩展曲线见
+  [BENCHMARK §8](docs/BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)；
 - 定长格式的文本列会被补空格到声明宽度，回灌时 `COL=CHAR(n)` 裁掉、`COL=VARCHAR(n)` 保留 ——
   想精确往返回去就用 `CHAR(n)`（代价是原值的尾随空格丢失）。细节与限制见
   [USER_MANUAL §18](docs/USER_MANUAL.zh-CN.md#18-导出表数据pg_fastload_export)。
@@ -395,7 +400,9 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 
 - **验证环境**：PostgreSQL 15.19 / 16.15 / 17.11 / 18.6 / 19rc1，x86_64 Linux，16 vCPU。
   五个主版本都用 `util/fl_ver_test.sh` 跑过同一套功能验收（CSV 串行/并行、定长串行/并行、
-  `FILTER` 降级、解析错误处理、命令行客户端），全部通过；版本差异与逐条适配说明见
+  `FILTER` 降级、解析错误处理、命令行客户端），全部通过；导出验收同样覆盖五个版本
+  （`util/fl_export_test.sh` 39 项，`util/fl_export_parallel_test.sh` 33 项 —— 后者合计 165/165）。
+  版本差异与逐条适配说明见
   [docs/PORTING.md](docs/PORTING.md)。**五个主版本共用 `master` 一个分支**：版本差异由
   `PG_VERSION_NUM` 在编译期解决，`include/pg_fastload.h` 对 15 以下主版本直接 `#error`。
 - **上游署名**：`COPYRIGHT` 原文逐字节保留，每个继承源文件头部保留 `Copyright (c) ... NTT, Inc.`；

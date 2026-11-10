@@ -544,9 +544,88 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
   `OUT_COL` 数量不符、目标文件已存在、NULL 未声明 `NULLIF`、未知关键字、缺 `TABLE`/`QUERY`、
   非 `SELECT` 的 `QUERY`、`DELIMITER` 等于 `QUOTE`；
 - **进度**：800 万行导出期间另一会话读到 `export|running|CSV|serial|...`，结束后视图回到 0 行。
+  （此时只有串行一种模式；自 §20.5 起同一张表报的是 `mode=parallel`。）
 
 装载侧的回归：CSV 90/90、定长 44/44 不受影响（导出只新增了 writer 与 `bytes` 计数，
 `WriterInsert`/`ReaderNext` 路径未改）。
+
+### 20.5 并行导出：N 个查询进程 + 1 个写进程（2026-11-10）
+
+§20 当时说导出单进程、要并行就得「各 worker 写临时文件 + 有序拼接，等于给整个输出补一次完整读+写」。
+那个估算的前提是**必须保住行序**。其实不必：导出是转储，契约只是「每行恰好一次」。一旦放开行序，
+拼接就完全消失，装载的进程模型可以直接反向复用：
+
+| 装载（`PARALLEL=ON`） | 导出（`PARALLEL=ON`） |
+|---|---|
+| 1 个 reader bgworker 单遍扫文件 | N 个查询 bgworker 各扫一段互不相交的 `ctid` 块区间 |
+| N 个 parser bgworker 造元组 | N 个查询 bgworker 把行格式化成字节 |
+| leader（后端）做串行 `WriterInsert` | 1 个 writer bgworker 做串行 `write(2)` + `fsync` |
+| reader → worker 走 `shm_mq` | worker → writer 走 `shm_mq`，每个 worker 一条队列 |
+
+新增文件：
+
+| 文件 | 内容 |
+|---|---|
+| `include/export_parallel.h` | DSM 布局（`FlExportShared` / `FlExportParams` / `FlExportChunk`）、key、队列与分块大小、请求结构 |
+| `lib/export_parallel.c` | 写进程、查询进程、`FlExportParallelSupported()` 降级判定、`FlExportParallelTry()` 编排 |
+
+修改文件：
+
+| 文件 | 改动 |
+|---|---|
+| `lib/export.c` | 解析 `PARALLEL=` / `PARALLEL_WORKERS=`；把 writer 选项序列化成 `KEY\0value\0` blob；`ResolveExportRelid()`（RangeVar → Oid，不走 SPI）；`ExportParallelAttempt()` 分发与回退；原串行 SPI 游标块变成 `else` 分支 |
+| `lib/writer.h`、`lib/writer_csv.c`、`lib/writer_binary.c` | 初始化拆成 `Prepare`（方言/outfunc/OUT_COL 布局，不涉及文件）+ `Init`（再加文件），并加 `StringInfo` **sink**：有 sink 时 writer 只往调用方内存追加，完全不碰文件 |
+| `lib/Makefile`、`lib/exports.txt` | 编译 `export_parallel.c`；导出两个 bgworker 入口（10、11） |
+| `util/fl_export_parallel_test.sh` | 新增验收脚本（33 项断言） |
+
+三个值得记录的设计点：
+
+1. **用 `heap_setscanlimits()` 而不是 `ctid` 谓词。** `WHERE ctid BETWEEN ...` 只是把过滤下推，
+   每个 worker 仍要扫完整张表（N 倍读放大）；把区间塞进扫描描述符后，每个 worker 从自己的块开始、
+   到自己的块结束。分片公式 `nblocks * i / nworkers` 在启动前算好 —— 没有共享队列、没有任务窃取、
+   数据通路上没有锁。
+2. **快照与 writer 选项以字节形式跨进程。** 每个 worker 用 `RestoreSnapshot()` 恢复 leader
+   `SerializeSnapshot()` 的结果，这样所有 worker 看到同一个快照（不会扫到之后插入的行）。writer
+   选项走 `KEY\0value\0` blob，因为 `Writer` 里存的是函数指针，它活不过 bgworker 的 `fork()`/`exec`。
+3. **写进程不认格式。** 一条消息就是 `{nrows, nbytes}` 加一段字节，因此 CSV 与 BINARY 共用一个写进程；
+   表头由写进程在第一块之前写一次，这才让 `HEADER=ON` 在任何调度下都正确。
+
+`LIMIT=` 依然精确：`pg_atomic_fetch_add_u64(&rows_reserved, CHUNK_ROWS)` 让各 worker 随意超订，
+最后一个把本块裁到剩余额度，于是行数精确，而**是哪几行**不确定。
+
+写验收脚本时抓到一个语义 bug：`PARALLEL_WORKERS=1` 被当成「没指定」（0 才是哨兵）而被默认值
+`CPU−1` 顶掉。修法是在套默认值之前直接拒绝 `nworkers == 1`，并用一条断言钉住日志里出现
+`PARALLEL disabled (workers=1)`。
+
+### 20.6 并行导出的性能
+
+`public.lineitem`（7,375,042 行、1.13 GiB CSV），输出在 tmpfs，5 轮取中位：
+
+| 配置 | 耗时 | 相对串行 |
+|---|---|---|
+| `COPY ... TO` | 3.956 s | 1.03× |
+| `PARALLEL=OFF` | 4.077 s | 1.00× |
+| 2 个 worker | 1.950 s | 2.09× |
+| 4 个 worker | 0.999 s | 4.08× |
+| 8 个 worker | 0.611 s | 6.68× |
+| auto（15 个 worker） | **0.424 s** | **9.60×** |
+
+15 个 worker 时管线以 2.85 GB/s 推过**一个** `write(2)` 循环：瓶颈从 worker 变成写进程 —— 这正是装载侧
+「串行插入下限」在导出方向的镜像。完整表格、以及为什么这台机器的磁盘数字不能用（裸 `write`+`fsync`
+微基准显示：块大小不变时 `fsync()` 会在 0.1 s 与恰好 30 s/60 s 之间跳变）见
+[BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
+
+### 20.7 验证
+
+`util/fl_export_parallel_test.sh`（随扩展交付）在 PG 18.6 上跑 33 项断言：串行基线；4 worker 的 CSV
+导出与串行**行集**相同、表头只出现一次、摘要往返、日志里 `workers=4`；`LIMIT` 跨 worker 精确且不重复；
+默认 worker 数（`CPU−1`）；并行 BINARY（文件大小、样例 `.ctl` 来源、回灌摘要）；三条串行回退
+（`QUERY=`、小表、`PARALLEL_WORKERS=1`）各自断言日志行；三条被拒输入（输出已存在、`.ctl` 已存在、
+`PARALLEL_WORKERS=0`）；运行中的 `mode='parallel'` 进度记录。
+
+33 项在 **15.19 / 16.15 / 17.11 / 18.6 / 19rc1** 上全部通过（合计 165 项）。PG 19 需要一处编译修正：
+`table_beginscan()` 多了一个 `ScanOptions` 参数，调用点现在走 `FL_TABLE_BEGINSCAN()`。装载侧套件不受影响
+（CSV 90/90、定长 44/44）。
 
 ---
 

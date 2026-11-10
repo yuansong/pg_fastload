@@ -62,6 +62,7 @@ struct Writer
 
 	bool			truncate;		/* truncate before load? */
 	bool			verbose;		/* output error message to server log? */
+	bool			header;			/* export CSV: emit a header line? */
 	ON_DUPLICATE	on_duplicate;	/* behavior when duplicated keys found */
 	int64			max_dup_errors;	/* max ignorable errors in unique indexes */
 	char		   *dup_badfile;	/* duplicate error file name */
@@ -86,6 +87,27 @@ extern Writer *CreateCsvWriter(void *opt);
 
 /* Export: describe the row type the tuples handed to a binary writer have. */
 extern void BinaryWriterSetSourceDesc(Writer *writer, TupleDesc src);
+
+/*
+ * Formatting without a file.
+ *
+ * The parallel export formats rows in the query workers and lets a single
+ * writer process do nothing but write(2); the writer is the serial stage, so
+ * everything that can be parallel has to happen before it.  These entry
+ * points set a writer up without opening its output file and redirect the
+ * formatted row into a caller-owned buffer.  With a sink installed the caller
+ * owns the lifetime of the buffer and must reset it between flushes; the
+ * writer's own 4 MiB buffer and fd are never touched.
+ */
+extern void CsvWriterPrepare(Writer *writer);
+extern void CsvWriterSetSink(Writer *writer, StringInfo sink);
+extern void CsvWriterAppendHeader(Writer *writer, StringInfo out);
+
+extern void BinaryWriterPrepare(Writer *writer);
+extern void BinaryWriterSetSink(Writer *writer, StringInfo sink);
+
+/* Text of the sample control file, or NULL when there is nothing to say. */
+extern char *BinaryWriterBuildSampleCtl(Writer *writer);
 
 extern Writer *WriterCreate(char *type, bool multi_process);
 extern void WriterInit(Writer *self);

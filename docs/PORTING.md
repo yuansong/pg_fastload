@@ -73,6 +73,8 @@ Every core difference actually met between 15 and 19 is listed below; none is le
 | 8 | `FuncnameGetCandidates()` gained a `int *fgc_flags` out-parameter that is **dereferenced unconditionally** | 19 | `ParseFunction()` (`FILTER` / `TYPE=FUNCTION`) | pass a one-element compound literal; passing `NULL` segfaults |
 | 9 | `Item` typedef removed; `PageAddItemExtended()` takes `const void *`; `PageSetChecksumInplace()` → `PageSetChecksum()` | 19 | `DirectWriterInsert()` and page checksum fill-in | version branch; ≥19 passes the pointer directly |
 | 10 | nbtree internals refactored: `BTSpool`/`BTWriteState` no longer exported, new `palloc0_object()` macros, `table_beginscan_parallel()` gained `SO_NONE` | 19 | index spool builder | new `lib/nbtree/nbtsort-19.c` (see §3.1) |
+| 11 | `table_beginscan()` gained a trailing `uint32 flags` (`ScanOptions`) argument | 19 | `FlExportQueryWorker()` in `export_parallel.c` | `FL_TABLE_BEGINSCAN()` macro passes `0` on ≥19 and keeps the 4-argument form below |
+| 12 | `TimestampTzGetDatum()` no longer arrives via `utils/builtins.h` | 19 | `export.c` | explicit `#include "utils/timestamp.h"` |
 
 ### 3.1 Version-pinned nbtree builders
 
@@ -124,6 +126,10 @@ physical insert order, so serial and parallel output can be compared directly.
 
 The digest values (CSV and fixed length) are identical on all four majors, which shows the parallel
 path produces byte-for-byte the same content as the serial path.
+
+The export suites run on all five as well: `util/fl_export_test.sh` 39/39 and
+`util/fl_export_parallel_test.sh` 33/33 per major (**165/165** for the parallel one), so the parallel
+export — background workers, DSM, `heap_setscanlimits()` — is exercised on every major, not only 18.6.
 
 ## 6. Known limitations
 
