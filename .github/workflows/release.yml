@@ -65,6 +65,15 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release ${tag} exists, updating it"
             gh release edit "$tag" --title "$title" --notes-file "$notes"
+            # Deleting and re-pushing a tag turns its release into a draft, and
+            # `gh release edit` does not publish it again.  Re-publishing is
+            # idempotent, so always check.
+            rid=$(gh release view "$tag" --json databaseId -q .databaseId)
+            draft=$(gh release view "$tag" --json isDraft -q .isDraft)
+            if [ "$draft" = "true" ]; then
+              echo "release ${tag} was a draft (tag re-created); publishing it"
+              gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${rid}" -F draft=false >/dev/null
+            fi
           else
             gh release create "$tag" --title "$title" --notes-file "$notes" --verify-tag
           fi
