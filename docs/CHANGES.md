@@ -334,4 +334,45 @@ versions were corrected.
 
 ---
 
+## 17. Upstream Parity Audit and Fixes (2026-11-10)
+
+Method: upstream `pg_bulkload` 3.1.23 was built against the **same** server and used as an oracle.
+Three differential suites feed identical input to `pgbulkload.pg_bulkload()` and to
+`pgfastload.pg_fastload()` in three configurations (`PARALLEL=OFF`, `PARALLEL=ON` w=2, w=4) and
+compare, per case: the SRF result row (`skip`/`count`/`parse_errors`/duplicate counters), the
+content digest `count(*) || coalesce(sum(hash_record_extended(t,0)),0)`, and the severity of the
+emitted messages. 75 cases were covered: quoting/escaping/CRLF/CR/blank lines/missing and extra
+fields/unterminated quotes, type-conversion failures, `SKIP`+`LIMIT` windows, duplicates on unique
+indexes and primary keys (including `ON_DUPLICATE_KEEP`), `WRITER=BUFFERED`/`PARALLEL`,
+`MULTI_PROCESS`, `FORCE_NOT_NULL`, `NULL`/`ENCODING`/custom `DELIMITER`+`QUOTE`+`ESCAPE`,
+`PARSE_ERRORS` 0/2, 200k-row and 1 MiB-chunk-boundary inputs, and fixed-length loads with
+`SKIP`/`LIMIT`/a trailing partial record.
+
+Four real defects were found and fixed; the serial path was correct in all 75 cases before the audit.
+
+| # | Defect | Root cause | Fix |
+|---|---|---|---|
+| 1 | A rejected record killed the worker (and with it the statement) instead of being counted; `count`/`parse_errors` were never reported | the parallel reader raised `unterminated CSV quoted field` itself, and worker parse/convert errors were never absorbed (the serial path absorbs them in `ReaderNext()`) | worker-side `PG_TRY`/`PG_CATCH` (`fl_emit_record_safe`), error published to the control block (`fl_record_parse_error`) together with record number and column, record appended to `PARSE_BADFILE`, leader reports it; the truncated final record is now routed to the worker instead of failing the reader |
+| 2 | `SKIP` behaved differently: `SKIP=1` skipped one *record* on the parallel path but one *line* upstream | `SKIP` was applied as a record offset in `fl_route_record()`; upstream's preamble counts physical lines and does not honour quotes | new `fl_skip_lines()` walks raw bytes before the record scan (`LF`, `CRLF`, lone `CR`), `fl_route_record()` keeps only `LIMIT` |
+| 3 | After the first rejected record the parallel path kept loading later records: 100k-row oracle vs **156k / 175k / 194k** rows for w=2/4/8, varying run to run | records for a rejected line are already queued in other workers; "stop reading, keep what was loaded" cannot be reproduced in parallel without buffering everything | the parallel contract is now **atomic**: same WARNING lines, then `ERROR` and full rollback. Never loads a record the oracle would not load, and no timing dependence (documented in USER_MANUAL §11) |
+| 4 | Heap overflow when a skipped line exceeded the 1 MiB read chunk | `fl_skip_lines()` kept appending into a fixed `FL_READ_CHUNK + 2` buffer (the record scan drains its carry every round, a skipped line does not); the first scan round after a skip had the same assumption | buffer grown with `repalloc` in both places |
+
+Also: the 8-byte record frame now carries the record number (`hdr8[1]`), so leader-side messages can
+name the failing input record, as the serial path does.
+
+The audit itself is reproducible: `util/fl_diff_test.py` is a self-contained version of the harness
+(44 cases × 4 configurations, no VM or SSH dependency) that needs nothing but both extensions
+installed in one cluster.
+
+Result after the fixes: **0 mismatches** — 75 cases × 3 configurations = 225 comparisons, of which 30
+are the documented atomic aborts (parallel only; the `PARALLEL=OFF` configuration matches the oracle
+exactly in every case). The whole suite was repeated on **15.19 / 16.15 / 17.11 / 18.6** with
+identical results (900 comparisons in total), and the per-major functional acceptance
+(`util/fl_ver_test.sh`) passes on 15.19 / 16.15 / 17.11 / 19rc1, as do `fastload_verify.py`
+**90/90** and `fastload_verify_fixed.py` **44/44**. PG19 has no oracle: upstream 3.1.23 does not
+compile there (it hits the `Datum` relocation that our `bin/pgut/pgut-list.h` handles), so 19rc1 is
+covered by functional acceptance and serial-vs-parallel self-consistency only.
+
+---
+
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

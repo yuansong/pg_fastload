@@ -282,7 +282,7 @@ KEY = 'VALUE WITH SPACES'
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
 | `INPUT` / `INFILE` | 路径或 `STDIN` | 无（必填） | 输入文件。仅 `STDIN` 时按客户端编码处理 |
-| `SKIP` / `OFFSET` | 整数 ≥ 0 | `0` | 跳过前 N 条记录（记录单位，非字节） |
+| `SKIP` / `OFFSET` | 整数 ≥ 0 | `0` | 跳过前 N 个**输入行**（`\n`、`\r\n` 或单个 `\r` 都算行尾；不识别引号，因此跨行的带引号记录会算作多行 —— 与 pg_bulkload 规则一致） |
 | `LOAD` / `LIMIT` | 整数 | 不限 | 最多装载 N 条记录（`SKIP` 之后计数） |
 | `ENCODING` | 编码名 | 数据库编码 | 输入文件编码；需要逐字段转码 |
 
@@ -530,14 +530,14 @@ SELECT count(*) || '|' || sum(hash_record_extended(t, 0)) FROM public.t AS t;
 
 | 场景 | 串行路径（`PARALLEL=OFF`） | 并行路径（`PARALLEL=ON`） |
 |---|---|---|
-| 字段数不符 / 输入函数报错 / 未闭合引号 | 计入 `parse_errors`，写 `PARSE_BADFILE` 后继续；超过 `PARSE_ERRORS` 时**停止读取并正常返回**（日志 `Maximum parse error count exceeded`），已装载行保留 | **该 worker 退出，整次装载失败** |
+| 字段数不符 / 输入函数报错 / 未闭合引号 | 计入 `parse_errors`，写 `PARSE_BADFILE` 后继续；超过 `PARSE_ERRORS` 时**停止读取并正常返回**（日志 `Maximum parse error count exceeded`），已装载行保留 | 先输出与串行相同的 `Parse error Record N: Input Record M ...` WARNING，随后**语句以 `ERROR` 失败并整体回滚**（不保留部分行） |
 | 重复键 | `DUPLICATE_ERRORS` 上限内写入 `DUPLICATE_BADFILE`，按 `ON_DUPLICATE_KEEP` 取舍 | 由 leader 串行写入，行为与串行一致 |
 | 约束违反 | 报错回滚 | 报错回滚 |
 
 因此：
 
 - **需要容错装载就用 `PARALLEL=OFF`**；
-- 并行路径适合"数据已清洗、要求快"的场景；
+- 并行路径适合"数据已清洗、要求快"的场景。它对被拒绝的记录采取**全有或全无**：出错记录之后的那些行此时已在其他 worker 的队列里，若沿用"保留错误前已读行"的语义，结果会依赖 worker 时序，可能装载出 pg_bulkload 永远不会装载的不确定超集；
 - `PARSE_BADFILE` / `DUPLICATE_BADFILE` 未指定时按 `LOGFILE` 基名派生，位于同一目录。
 
 ---

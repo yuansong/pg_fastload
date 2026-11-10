@@ -298,6 +298,8 @@ fastload_fill_params(FastloadParams *p, Reader *rd, Writer *wt, int nworkers)
 	p->collation = InvalidOid;
 
 	strlcpy(p->infile, rd->infile, MAXPGPATH);
+	if (rd->parse_badfile != NULL)
+		strlcpy(p->parse_badfile, rd->parse_badfile, MAXPGPATH);
 
 	db = get_database_name(MyDatabaseId);
 	strlcpy(p->dbname, db ? db : "", NAMEDATALEN);
@@ -740,6 +742,66 @@ FastloadParallelRun(Reader *rd, Writer *wt)
 			{
 				pg_usleep(1000L);	/* 1ms; workers are producing */
 				FL_TICK(prof_par_wait, tick);
+			}
+		}
+
+		/*
+		 * Parse-error contract.
+		 *
+		 * The serial path stops reading at the first rejected record and
+		 * returns normally, keeping the rows that were already written.  A
+		 * parallel load cannot reproduce that set: records for the rejected
+		 * one are already in flight in other workers' queues, and whether
+		 * they land before the abort is observed depends on worker timing.
+		 * Measured on a 200k-row file with one bad record at row 100k, the
+		 * parallel path committed 156k / 175k / 194k rows for w=2/4/8 while
+		 * pg_bulkload committed exactly 100k -- a nondeterministic superset.
+		 *
+		 * We therefore make the parallel contract strictly atomic: report
+		 * the same WARNING lines as the serial path (for log parity), then
+		 * fail the statement so the transaction rolls back.  No partial
+		 * load, no timing dependence.  PARALLEL=OFF keeps the serial
+		 * semantics for callers that want them.
+		 */
+		{
+			int		nerr;
+			int64	recno;
+			int		field;
+			char	errbuf[512];
+
+			SpinLockAcquire(&hdr->mutex);
+			nerr = hdr->parse_errors;
+			recno = hdr->error_recno;
+			field = hdr->error_field;
+			memcpy(errbuf, hdr->error_message, sizeof(errbuf));
+			SpinLockRelease(&hdr->mutex);
+
+			if (nerr > 0)
+			{
+				rd->parse_errors += nerr;
+				if (field > 0)
+					LoggerLog(WARNING, "Parse error Record " INT64_FORMAT
+							  ": Input Record " INT64_FORMAT
+							  ": Rejected - column %d. %s\n",
+							  rd->parse_errors, recno, field, errbuf);
+				else
+					LoggerLog(WARNING, "Parse error Record " INT64_FORMAT
+							  ": Input Record " INT64_FORMAT
+							  ": Rejected. %s\n",
+							  rd->parse_errors, recno, errbuf);
+				LoggerLog(WARNING, "Maximum parse error count exceeded - "
+						  INT64_FORMAT " error(s) found in input file\n",
+						  rd->parse_errors);
+
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("parallel load aborted: input record "
+								INT64_FORMAT " was rejected", recno),
+						 errdetail("%s", errbuf),
+						 errhint("PARALLEL requires PARSE_ERRORS = 0 and rolls "
+								 "back the whole load on the first rejected "
+								 "record.  Use PARALLEL = OFF to keep the rows "
+								 "read before the error, like the serial path.")));
 			}
 		}
 
