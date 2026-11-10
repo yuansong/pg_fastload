@@ -272,6 +272,8 @@ BinaryParserRead(BinaryParser *self, Checker *checker)
 								errmsg("could not read input file: %m")));
 		}
 		FASTLOAD_PROFILE(&prof_reader_source);
+		if (len > 0)
+			self->base.bytes_read += len;	/* progress accounting */
 
 		/*
 		 * Calculate the actual number of rows. Trailing remainder bytes

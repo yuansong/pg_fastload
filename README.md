@@ -78,6 +78,7 @@ Other sizes, the fixed-length format and cold-cache results: [docs/BENCHMARK.md]
 | Stage-level profiling | partial | ✓ GLOBAL / PARALLEL / WORKER, including per-worker SCAN/FORM/IPC |
 | Skip spool work on unindexed tables | ✗ | ✓ (`SpoolerInsert()` early return, ~0.28 s/1 GiB) |
 | Per-row error tolerance + badfile | ✓ | ✓ (serial path; the parallel path fails the load instead) |
+| Load progress reporting | ✗ | ✓ (`PROGRESS=ON`: percentage, rows, MiB/s, ETA — see [USER_MANUAL §12.4](docs/USER_MANUAL.md#124-load-progress)) |
 | Every original control keyword | ✓ | ✓ (unchanged semantics, incl. `WRITER=PARALLEL`) |
 
 ### 2.3 Usage
@@ -278,6 +279,29 @@ SELECT count, duration FROM pgfastload.pg_fastload(ARRAY[...]);
 Both options are equivalent: the CLI literally issues
 `BEGIN; SELECT pgfastload.pg_fastload(ARRAY[...]); COMMIT;`.
 The only difference is who reads the control file and how paths are written.
+
+### 4.5 Watch a long load
+
+Add two keywords and the statement reports itself while it runs:
+
+```sql
+SELECT * FROM pgfastload.pg_fastload(ARRAY[
+  'INPUT=/tmp/tpcc/order_line.csv',
+  'OUTPUT=public.order_line',
+  'PARALLEL=ON',
+  'PROGRESS=ON',
+  'PROGRESS_INTERVAL=1000'        -- ms between two reports (default 1000)
+]);
+```
+
+```
+NOTICE:  pg_fastload progress: 32.7% (334.8 MiB / 1024.0 MiB) | rows 2,410,881 | 129.6 MiB/s | 933.0k rows/s | elapsed 00:00:02 | ETA 00:00:05
+NOTICE:  pg_fastload progress: 100.0% (1024.0 MiB / 1024.0 MiB) | rows 7,375,042 | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+```
+
+The line is a `NOTICE` (so it streams as the load runs) and is also copied to `LOGFILE`. Cost is one
+integer comparison per row. Details, including what the percentage falls back to when the input size
+is unknown: [USER_MANUAL §12.4](docs/USER_MANUAL.md#124-load-progress).
 
 Full keyword list and return columns: [docs/USER_MANUAL.md](docs/USER_MANUAL.md).
 

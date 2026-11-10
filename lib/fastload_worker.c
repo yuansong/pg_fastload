@@ -815,6 +815,27 @@ fl_route_record(FastloadParams *p, FastloadRouter *router, int64 rec_no,
 }
 
 /*
+ * Publish how many input bytes the reader has consumed so far.
+ *
+ * PROGRESS=ON: the leader samples FastloadShared.bytes_read every 1024
+ * inserted rows and turns it into a percentage, so the reader never has to
+ * wake anybody up.  Called once per read() (1 MiB), so the spinlock cost is
+ * far below the read() itself.
+ */
+static void
+fl_publish_bytes(FastloadRouter *router, int64 n)
+{
+	FastloadShared *hdr = router->hdr;
+
+	if (hdr == NULL || n <= 0)
+		return;
+
+	SpinLockAcquire(&hdr->mutex);
+	hdr->bytes_read += n;
+	SpinLockRelease(&hdr->mutex);
+}
+
+/*
  * Skip the first `p->skip` PHYSICAL lines of the input.
  *
  * The serial CSVParserRead() preamble does exactly this: it walks raw bytes,
@@ -832,8 +853,8 @@ fl_route_record(FastloadParams *p, FastloadRouter *router, int64 rec_no,
  * The buffer is therefore grown on demand here.
  */
 static void
-fl_skip_lines(FastloadParams *p, int fd, char *chunk, char **pend_io,
-			  int *cap_io, int *pend_len_io, bool *eof_io)
+fl_skip_lines(FastloadParams *p, FastloadRouter *router, int fd, char *chunk,
+			  char **pend_io, int *cap_io, int *pend_len_io, bool *eof_io)
 {
 	int64		skipped = 0;
 	char	   *pend = *pend_io;
@@ -915,6 +936,7 @@ fl_skip_lines(FastloadParams *p, int fd, char *chunk, char **pend_io,
 				}
 				memcpy(pend + pend_len, chunk, n);
 				pend_len += n;
+				fl_publish_bytes(router, n);
 			}
 		}
 	}
@@ -982,7 +1004,7 @@ fl_reader_scan(FastloadParams *p, FastloadRouter *router)
 	 * therefore starts at record 0 and applies only LIMIT.
 	 */
 	if (p->skip > 0)
-		fl_skip_lines(p, fd, chunk, &pend, &pend_cap, &pend_len, &eof);
+		fl_skip_lines(p, router, fd, chunk, &pend, &pend_cap, &pend_len, &eof);
 
 	for (;;)
 	{
@@ -1018,6 +1040,7 @@ fl_reader_scan(FastloadParams *p, FastloadRouter *router)
 			}
 			memcpy(pend + pend_len, chunk, n);
 			pend_len += n;
+			fl_publish_bytes(router, n);
 		}
 		total = pend_len;
 
@@ -1188,7 +1211,10 @@ fl_reader_scan_fixed(FastloadParams *p, FastloadRouter *router)
 			if (n == 0)
 				eof = true;
 			else
+			{
 				pend_len += (Size) n;
+				fl_publish_bytes(router, n);
+			}
 		}
 
 		while (pend_len - i >= stride)

@@ -378,6 +378,9 @@ CSVParserRead(CSVParser *self, Checker *checker)
 		{
 			int		n;
 
+			/* Progress accounting: bytes pulled from the input. */
+			self->base.bytes_read += len;
+
 			for (n = 0; n < len; n++)
 			{
 				if (self->rec_buf[n] == '\r')
@@ -487,6 +490,8 @@ skip_done:
 			ret = SourceRead(self->source, self->rec_buf + self->used_len,
 								self->buf_len - self->used_len - 1);
 			FASTLOAD_PROFILE(&prof_reader_source);
+			if (ret > 0)
+				self->base.bytes_read += ret;	/* progress accounting */
 			if (ret == 0)
 			{
 				self->eof = true;

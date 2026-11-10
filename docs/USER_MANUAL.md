@@ -346,6 +346,15 @@ reason fixed-length loading is several times faster than CSV.
 | `PARALLEL` | `ON` / `OFF` | `OFF` | enable the multi-process parallel load |
 | `PARALLEL_WORKERS` | `1`..`64` | online CPUs − 1 (≥ 1) | number of parser workers; `≤ 1` falls back to serial |
 
+### 6.9 Progress reporting (new in pg_fastload)
+
+| Keyword | Values | Default | Notes |
+|---|---|---|---|
+| `PROGRESS` | `ON` / `OFF` | `OFF` | emit a one-line progress report while the load runs |
+| `PROGRESS_INTERVAL` | `100`..`3600000` (ms) | `1000` | minimum gap between two reports; **specifying it implies `PROGRESS=ON`** |
+
+See [§12.4](#124-load-progress) for the output format and cost.
+
 ---
 
 ## 7. SQL interface
@@ -594,6 +603,51 @@ SELECT pid, backend_type, state FROM pg_stat_activity WHERE backend_type LIKE '%
 ```
 
 During a parallel load you should see one reader plus N workers.
+
+### 12.4 Load progress
+
+A `pg_fastload()` call is one SQL statement, so without help it stays silent until it returns —
+uncomfortable when a 100 GB load runs for half an hour. `PROGRESS=ON` prints a snapshot at a fixed
+cadence:
+
+```sql
+SELECT * FROM pgfastload.pg_fastload(ARRAY[
+  'INPUT=/data/lineitem.csv',
+  'OUTPUT=public.lineitem',
+  'PARALLEL=ON',
+  'PROGRESS=ON',
+  'PROGRESS_INTERVAL=1000'   -- ms; default 1000
+]);
+```
+
+```
+NOTICE:  pg_fastload progress: start, input 1024.0 MiB, interval 1000 ms
+NOTICE:  pg_fastload progress: 12.6% (129.0 MiB / 1024.0 MiB) | rows 927,744 | 122.8 MiB/s | 883.1k rows/s | elapsed 00:00:01 | ETA 00:00:07
+NOTICE:  pg_fastload progress: 50.0% (512.0 MiB / 1024.0 MiB) | rows 3,687,521 | 136.4 MiB/s | 982.0k rows/s | elapsed 00:00:03 | ETA 00:00:03
+NOTICE:  pg_fastload progress: 100.0% (1024.0 MiB / 1024.0 MiB) | rows 7,375,042 | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+```
+
+| Field | Meaning |
+|---|---|
+| percentage | input bytes consumed ÷ input size. Falls back to *rows ÷ `LIMIT`* when the input size is unknown, and is omitted entirely for STDIN / pipes |
+| `rows` | rows the leader has inserted — the number the statement will report |
+| `read` | bytes the reader has consumed (serial: the parser; parallel: the single reader process) |
+| `…/s` | average byte and row rate since the statement started |
+| `ETA` | remaining bytes ÷ average byte rate (only with a known percentage) |
+| `\| done` | the closing line, always emitted once, even when the load is shorter than one interval |
+
+Notes:
+
+- The report is a `NOTICE`, so it obeys `client_min_messages`; it does not appear if you set that
+  to `warning` or above. The same text is appended to `LOGFILE`, which is how a background load is
+  watched afterwards.
+- The percentage is byte-based and never regresses. It stops at `99.9%` until the closing line: the
+  reader can be at EOF while the leader still has rows to insert, and a mid-load `100.0%` only reads
+  as a stall.
+- Cost is one integer comparison per inserted row (the clock is sampled once every 512 rows), below
+  0.1% on the 1 GiB baseline; the closing line and the `LOGFILE` copy are the only extra I/O.
+- A load that aborts on a rejected record (see [§11](#11-error-handling-and-badfiles)) prints no
+  closing line, because it is not done.
 
 ---
 

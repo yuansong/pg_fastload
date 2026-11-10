@@ -69,6 +69,8 @@ struct Parser
 
 	int			parsing_field;	/**< field number being parsed */
 	int64		count;			/**< number of records read from stream */
+	int64		bytes_read;		/**< bytes pulled from the source so far;
+								 * drives the PROGRESS percentage */
 };
 
 extern Parser *CreateBinaryParser(void);
@@ -198,6 +200,10 @@ struct Reader
 	char		   *parallel_null;		/**< NULL marker string */
 	bool			parallel_has_filter;
 	bool			parallel_has_fnn;
+
+	/* Load progress reporting (lib/progress.c) */
+	bool			progress;			/**< PROGRESS = ON */
+	int				progress_interval;	/**< PROGRESS_INTERVAL, ms; 0 => default */
 };
 
 extern Reader *ReaderCreate(char *type);
