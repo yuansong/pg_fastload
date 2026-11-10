@@ -442,7 +442,8 @@ CSV 90/90、定长 44/44 与多版本验收均不受影响。
 15.19 / 16.15 / 17.11 / 18.6 / 19rc1 全部 `INSTALL_OK`，`CREATE EXTENSION` 成功，同一文件串行与
 `PARALLEL=ON` 装载的内容摘要一致，进度视图存在。证据：`compat_master_pg1x.out`。
 
-五个分版本分支已从本地与远端删除；GitHub 默认分支为 `master`。
+五个分版本分支已从本地与远端删除。日常开发使用 `master`；远端残留的 `REL_18_STABLE` 是原先的
+默认分支指针，在 Settings → Branches 里把默认分支切到 `master` 后即可删除。
 
 ---
 
