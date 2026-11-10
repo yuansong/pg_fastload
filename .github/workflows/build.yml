@@ -1,4 +1,8 @@
-name: Build_with_ubuntu_packages
+name: Build with Ubuntu packages
+
+# Compile check on every supported major.  PostgreSQL 14 and older are not in
+# the matrix on purpose: include/pg_fastload.h rejects them with #error, so the
+# job would fail by design.
 
 on:
   push:
@@ -13,77 +17,54 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
-        PGVERSION:                # TODO: build with master branch
+        PGVERSION:
           - "18"
           - "17"
           - "16"
           - "15"
-          - "14"
-
-    env:
-      CACHE_VERSION: 20251204  # to identify cache version
 
     steps:
-    - name: cat version
-      shell: bash -xe {0}
-      run: |
-         cat /etc/os-release
-         uname -a
+      - uses: actions/checkout@v4
 
-    - name: get current branch name
-      shell: bash -xe {0}
-      run: |
-        if [ ${{ github.event_name }} = "pull_request" ]; then
-          echo "BRANCH=${{ github.base_ref }}" >>  $GITHUB_ENV
-        else # push
-          echo "BRANCH=${GITHUB_REF##*/}" >>  $GITHUB_ENV
-        fi
+      - name: Install PostgreSQL ${{ matrix.PGVERSION }} build dependencies
+        shell: bash -xe {0}
+        run: |
+          # apt-key was removed in Ubuntu 24.04; the key is now pinned per
+          # repository with signed-by.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          # libselinux-dev does not exist on noble; the package is libselinux1-dev.
+          sudo apt-get -y install \
+            build-essential \
+            libpam-dev \
+            libkrb5-dev \
+            libssl-dev \
+            libreadline-dev \
+            libselinux1-dev \
+            libedit-dev \
+            liblz4-dev \
+            libnuma-dev \
+            zlib1g-dev \
+            postgresql-${{ matrix.PGVERSION }} \
+            postgresql-server-dev-${{ matrix.PGVERSION }}
 
-    - name: set build postgresql version
-      shell: bash -xe {0}
-      run: |
-        echo "PGVERSION=${{ matrix.PGVERSION }}" >> $GITHUB_ENV
+      - name: make (compile only — the functional suites run in the Test workflow)
+        shell: bash -xe {0}
+        run: |
+          LOGFILE=~/make.log
+          make PG_CONFIG=/usr/lib/postgresql/${{ matrix.PGVERSION }}/bin/pg_config 2>&1 | tee $LOGFILE
 
-    - name: remove pre-installed postgresql packages
-      shell: bash -xe {0}
-      run: sudo apt-get remove postgresql*
+      - name: show build warnings
+        shell: bash -xe {0}
+        run: |
+          grep -C 1 warning ~/make.log || exit 0
 
-    - name: download packages for building
-      shell: bash -xe {0}
-      run: |
-        # https://www.postgresql.org/download/linux/ubuntu/
-        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-        sudo apt-get update
-        sudo apt-get -y install           \
-          build-essential                 \
-          libpam-dev                      \
-          libkrb5-dev                     \
-          libssl-dev                      \
-          libreadline-dev                 \
-          libselinux-dev                  \
-          libedit-dev                     \
-          liblz4-dev                      \
-          libnuma-dev                     \
-          zlib1g-dev                      \
-          postgresql-${{ env.PGVERSION }} \
-          postgresql-server-dev-${{ env.PGVERSION }}
-
-    - uses: actions/checkout@v2
-
-    - name: make  # only check if build is success. The tests are skipped because another workflow does so.
-      shell: bash -xe {0}
-      run: |
-        LOGFILE=~/make.log
-        make 2>&1 | tee $LOGFILE
-
-    - name: show build warning
-      shell: bash -xe {0}
-      run: |
-        LOGFILE=~/make.log
-        grep -C 1 warning $LOGFILE || exit 0       # ok if warning doesn't exists (= status code is 1)
-
-    - name: check version
-      shell: bash -xe {0}
-      run: bin/pg_fastload --version
+      - name: check the client version string
+        shell: bash -xe {0}
+        run: bin/pg_fastload --version
