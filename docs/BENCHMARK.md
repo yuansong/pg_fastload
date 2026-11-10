@@ -204,9 +204,14 @@ because the fixed overhead (DSM creation, bgworker startup, on the order of tens
 
 ## 8. Export Throughput: `pg_fastload_export` vs `COPY TO`
 
-Export is single-process by construction: one backend fetches rows from a cursor and writes one file.
-There is no `PARALLEL` keyword on this path, so the comparison is against `COPY` on one side and against
-the loader fed the same bytes on the other.
+An export reads a table and writes one file. Since `PARALLEL` became real on this path (2026-11-10,
+see [USER_MANUAL §18.6](USER_MANUAL.md)), the only irreducible serial stage left is `write(2)`; every
+CPU term — scan, deform, output functions, quoting — runs in query workers.
+
+§8.1 decomposes the serial path (useful for seeing *what* parallelises), §8.2 is the scaling curve,
+and §8.3 explains why the end-to-end disk numbers from this host cannot be used for comparison.
+
+### 8.1 Serial decomposition
 
 | Item | Value |
 |---|---|
@@ -233,24 +238,77 @@ Reading the table: the scan is not where the time goes. A serial heap scan of th
 parallel scan, so ~0.70 s of either export is per-row work in the writer. Of our 0.90 s, about 0.48 s
 is per-row overhead that does not depend on what is written — cursor round trip,
 `heap_deform_tuple`, one `MemoryContextSwitchTo`/`Reset` pair per row — 0.40 s is text output plus
-quoting of the 264 MB `pad` column, and 0.04 s is the file write itself. The export is therefore
-CPU-bound inside a single backend, with 15 of the 16 cores idle, and a cursor cannot use a parallel
-plan at all. `PROGRESS=ON` is free (0.90 s either way); the clock is sampled every 512 rows.
+quoting of the 264 MB `pad` column, and 0.04 s is the file write itself. All of it except the last
+0.04 s is parallelisable, which is what §8.2 does. `PROGRESS=ON` is free (0.90 s either way); the clock
+is sampled every 512 rows.
 
-Two consequences worth stating plainly:
+Two consequences still worth stating plainly:
 
-* **Export is slower than `COPY TO`, by roughly 12%** (0.90 s vs 0.80 s server-side). The earlier
-  figure of 0.95 s in this section was `psql`'s `\copy`, which pays a client round trip for 8M rows;
-  server-side `COPY` does not. The output is still `cmp`-identical, and the export path is the one that
-  also drives BINARY/FIXED, so paying 0.10 s for one shared writer is a fair trade.
+* **The serial export is slower than `COPY TO`, by roughly 12%** (0.90 s vs 0.80 s server-side). The
+  figure of 0.95 s that this section used to quote was `psql`'s `\copy`, which pays a client round trip
+  for 8M rows; server-side `COPY` does not. The output is still `cmp`-identical, and the same writer also
+  drives BINARY/FIXED, so paying 0.10 s for one shared writer is a fair trade.
 * **BINARY is not cheaper than CSV** (0.94 s vs 0.90 s), unlike what one might expect from a
   `memcpy`-style writer. The layout pass runs the tuple checker first — it builds a coerced tuple and
   copies every field into its declared width — which offsets the text conversion it avoids.
 
-Parallelising this path would have to preserve row order to stay comparable (`cmp`) and to round-trip,
-so the only workable design is ctid-range partitioning into per-worker temporary files plus an ordered
-stitch, which adds a full read and write of the output. The parallel loader's 0.48 s is an upper bound
-that ignores that stitch; the realistic ceiling on this host is about 2×. It is left as a documented
-trade-off (USER_MANUAL §15, item 11) rather than shipped.
+### 8.2 Parallel scaling
+
+| Item | Value |
+|---|---|
+| Table | `public.lineitem`: 7,375,042 rows / 1.2 GiB heap, 16 columns (TPC-H), no index |
+| Output | CSV, 1,211,732,906 B without header (1.13 GiB) |
+| Target | `/dev/shm` (tmpfs) — see §8.3 for why not a disk |
+| Environment | as in §2, page cache warmed, median of 5 rounds, `PROGRESS=OFF` |
+
+| Config | Median | Min | MB/s | M rows/s | vs serial |
+|---|---|---|---|---|---|
+| `COPY ... TO` (server side) | 3.956 s | 3.920 s | 306 | 1.86 | 1.03× |
+| export `PARALLEL=OFF` | 4.077 s | 4.024 s | 297 | 1.81 | 1.00× |
+| export, 2 workers | 1.950 s | 1.932 s | 621 | 3.78 | **2.09×** |
+| export, 4 workers | 0.999 s | 0.991 s | 1213 | 7.38 | **4.08×** |
+| export, 8 workers | 0.611 s | 0.577 s | 1984 | 12.08 | **6.68×** |
+| export, auto (16 CPUs − 1 = 15) | 0.424 s | 0.399 s | 2855 | 17.37 | **9.60×** |
+
+Round-to-round spread is under 5% for every row (e.g. auto: 0.45 / 0.44 / 0.40 / 0.42 / 0.42), which is
+what a memcpy-bound pipeline should look like.
+
+Three things the table says:
+
+* **The writer becomes the ceiling.** At 15 workers the pipeline moves 2.85 GB/s of formatted bytes
+  through one `write(2)` loop — the workers are no longer the bottleneck, the single writer process is.
+  This is the export-side mirror of the loader's "leader serial insert" floor (§9 of
+  [ARCHITECTURE](ARCHITECTURE.md)) and is why the design stops there instead of adding more workers.
+* **Scaling is slightly sub-linear** (2.09 / 4.08 / 6.68 / 9.60 for 2 / 4 / 8 / 15 workers) because every
+  byte is copied twice more than in the serial path: formatter → `shm_mq` ring, ring → writer buffer.
+  That extra copy is ~0.2 s per GiB and is already inside these numbers.
+* **Serial vs `COPY TO`** is 1.03× here but 1.12× on the §8.1 table — the wider 16-column lineitem
+  spends relatively less on the per-row cursor round trip, which is precisely the term parallelisation
+  removes.
+
+Correctness at full size: reloading the 4-worker output into a `LIKE`-copy of the source and comparing an
+order-independent digest gives `7375042|9258128314029119699254` on both sides.
+
+### 8.3 Why the disk numbers from this host are not usable
+
+An end-to-end export to XFS (rather than tmpfs) measured 4.06 s serial and 31.0 s with 15 workers — a
+7.6× *slowdown* that has nothing to do with the design. A bare microbenchmark on the same filesystem
+(one `write()` loop plus `fsync()`, no PostgreSQL involved) shows why:
+
+| Block size | Round | `write()` | `fsync()` |
+|---|---|---|---|
+| 4 MiB | 0 / 1 | 0.15 s / 0.15 s | 0.11 s / 0.12 s |
+| 256 KiB | 0 / 1 | 0.17 s / 0.18 s | 0.14 s / **60.38 s** |
+| 64 KiB | 0 / 1 | 0.25 s / 0.21 s | **30.56 s** / **30.51 s** |
+
+Writing 1.2 GiB is always fast (it goes to page cache); `fsync()` alone alternates between ~0.1 s and
+exactly 30 s or 60 s **at the same block size**. That is the host hypervisor's storage stall, the same
+artefact documented for the load path in [OPTIMIZATION](OPTIMIZATION.md). Any export timing that includes
+`fsync()` on this VM therefore measures the hypervisor, not the pipeline, and the serial and parallel
+paths draw from the same lottery. The scaling table above is measured on tmpfs so that `fsync()` is
+free; the untrustworthy on-disk figures are kept here as evidence rather than omitted.
+
+Note also that `COPY TO` does not `fsync()` at all, so an on-disk comparison would not even be
+like-for-like: the export buys durability that the `COPY` number does not pay for.
 
 ---

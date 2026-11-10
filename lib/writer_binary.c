@@ -44,6 +44,8 @@ typedef struct BinaryWriter
 
 	int		bin_fd;			/**< File descriptor of binary file to output */
 	int		ctl_fd;			/**< File descriptor of control file to output */
+	StringInfo	sink;		/**< non-NULL: append records here instead of the
+								 * file (parallel export) */
 	size_t	rec_len;		/**< One record length */
 	char   *buffer;			/**< record buffer to keep output data */
 	int		used_rec_cnt;	/**< # of used records in buffer */
@@ -97,9 +99,6 @@ static void
 BinaryWriterInit(BinaryWriter *self)
 {
 	char		path[MAXPGPATH];
-	TupleDesc	tupdesc;
-	int			i;
-	bool		need_check = false;
 
 	Assert(self->base.truncate == false);
 
@@ -108,6 +107,29 @@ BinaryWriterInit(BinaryWriter *self)
 									"binary output file", true);
 	snprintf(path, MAXPGPATH, "%s.ctl", self->base.output);
 	self->ctl_fd = open_output_file(path, "sample control file", true);
+
+	BinaryWriterPrepare((Writer *) self);
+}
+
+/**
+ * @brief Everything BinaryWriterInit() does except touching the files.
+ *
+ * Builds the OUT_COL tuple descriptor, the record buffer and the tuple
+ * checker from the field descriptors collected by BinaryWriterParam().  The
+ * parallel export calls this in each query worker: rows are packed into the
+ * worker's buffer and shipped to the single writer process, so no output file
+ * may be opened here.
+ */
+void
+BinaryWriterPrepare(Writer *writer)
+{
+	BinaryWriter *self = (BinaryWriter *) writer;
+	TupleDesc	tupdesc;
+	int			i;
+	bool		need_check = false;
+
+	if (self->base.desc != NULL)
+		return;
 
 	/* create TupleDesc */
 #if PG_VERSION_NUM >= 120000
@@ -158,13 +180,19 @@ BinaryWriterInit(BinaryWriter *self)
 #endif
 }
 
+void
+BinaryWriterSetSink(Writer *writer, StringInfo sink)
+{
+	((BinaryWriter *) writer)->sink = sink;
+}
+
+/**
+ * @brief Pack one tuple into @a col using the OUT_COL field descriptors.
+ */
 static void
-BinaryWriterInsert(BinaryWriter *self, HeapTuple tuple)
+binary_pack_record(BinaryWriter *self, HeapTuple tuple, char *col)
 {
 	int		i;
-	char   *col;
-
-	col = self->buffer + (self->rec_len * self->used_rec_cnt);
 
 	/* Break down the tuple into fields */
 	heap_deform_tuple(tuple, self->base.desc, self->values, self->nulls);
@@ -180,6 +208,30 @@ BinaryWriterInsert(BinaryWriter *self, HeapTuple tuple)
 
 		col += field->len;
 	}
+}
+
+static void
+BinaryWriterInsert(BinaryWriter *self, HeapTuple tuple)
+{
+	char   *col;
+
+	/*
+	 * Sink mode (parallel export): pack exactly one record into the head of
+	 * the record buffer and hand it to the caller, which owns the buffering
+	 * and the process that eventually writes it.
+	 */
+	if (self->sink != NULL)
+	{
+		binary_pack_record(self, tuple, self->buffer);
+		appendBinaryStringInfo(self->sink, self->buffer, self->rec_len);
+		self->base.bytes += self->rec_len;
+		FASTLOAD_PROFILE(&prof_writer_table);
+		return;
+	}
+
+	col = self->buffer + (self->rec_len * self->used_rec_cnt);
+
+	binary_pack_record(self, tuple, col);
 
 	/* open file */
 	if (self->bin_fd == -1)
@@ -236,60 +288,15 @@ BinaryWriterClose(BinaryWriter *self, bool onError)
 	/* create sample of control file */
 	if (self->base.count > 0)
 	{
-		char		   *filepath;
-		char		   *filename;
-		char		   *extension;
-		StringInfoData	buf;
+		char   *text = BinaryWriterBuildSampleCtl((Writer *) self);
 
-		filepath = self->base.output;
-
-		/* remove extension of outfile */
-		filename = strrchr(self->base.output, '/');
-		Assert(filename);
-		filename++;
-		filename = pstrdup(filename);
-		extension = strrchr(filename, '.');
-		if (extension && filename < extension)
-			*extension = '\0';
-
-		initStringInfo(&buf);
-		appendStringInfo(&buf, "INPUT = %s\n", filepath);
-		/*
-		 * OUTPUT keeps the upstream default (the file name without its
-		 * extension), because a sample control file describes a *file*: the
-		 * relation to load into is the user's decision, and defaulting to the
-		 * table the rows came from would silently append them back into it.
-		 * An export does know that table, so it is recorded as a comment.
-		 */
-		if (self->base.sample_output)
-			appendStringInfo(&buf, "# exported from %s\n",
-							 self->base.sample_output);
-		appendStringInfo(&buf, "OUTPUT = %s\n", filename);
-		appendStringInfo(&buf, "LOGFILE = %s.log\n", filepath);
-		appendStringInfo(&buf, "PARSE_BADFILE = %s.prs\n", filepath);
-		appendStringInfo(&buf, "DUPLICATE_BADFILE = %s.dup\n", filepath);
-		appendStringInfoString(&buf,
-							   "PARSE_ERRORS = INFINITE\n"
-							   "DUPLICATE_ERRORS = 0\n"
-							   "ON_DUPLICATE_KEEP = NEW\n"
-							   "SKIP = 0\n"
-							   "LIMIT = INFINITE\n"
-							   "CHECK_CONSTRAINTS = NO\n"
-							   "MULTI_PROCESS = YES\n"
-							   "VERBOSE = NO\n"
-							   "TRUNCATE = NO\n"
-							   "WRITER = DIRECT\n"
-							   "TYPE = BINARY\n");
-		BinaryDumpParams(self->fields, self->nfield, &buf, "COL");
-		appendStringInfo(&buf, "# ENCODING = %s\n", GetDatabaseEncodingName());
-
-		if (write(self->ctl_fd, buf.data, buf.len) != buf.len)
+		if (text != NULL && self->ctl_fd >= 0 &&
+			write(self->ctl_fd, text, strlen(text)) != (ssize_t) strlen(text))
 			ereport(WARNING,
 					(errcode_for_file_access(),
 					 errmsg("could not write to sample control file: %m")));
-
-		pfree(filename);
-		pfree(buf.data);
+		if (text)
+			pfree(text);
 	}
 
 	close_output_file(&self->bin_fd, "binary output file");
@@ -399,6 +406,71 @@ BinaryWriterSetSourceDesc(Writer *writer, TupleDesc src)
 	tc->status = NEED_COERCION;
 	tc->opt = self->fields;
 	tc->checker = (CheckerTupleProc) BinaryWriterCheckerTuple;
+}
+
+/**
+ * @brief Text of the sample control file, or NULL when there is none to write.
+ *
+ * Split out of BinaryWriterClose() so the parallel export can produce the
+ * same file from the leader: there the writer process owns the data file, and
+ * the leader is the only place that still knows the source relation name.
+ */
+char *
+BinaryWriterBuildSampleCtl(Writer *writer)
+{
+	BinaryWriter   *self = (BinaryWriter *) writer;
+	char		   *filepath;
+	char		   *filename;
+	char		   *extension;
+	StringInfoData	buf;
+
+	if (self->base.output == NULL)
+		return NULL;
+
+	filepath = self->base.output;
+
+	/* remove extension of outfile */
+	filename = strrchr(self->base.output, '/');
+	Assert(filename);
+	filename++;
+	filename = pstrdup(filename);
+	extension = strrchr(filename, '.');
+	if (extension && filename < extension)
+		*extension = '\0';
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "INPUT = %s\n", filepath);
+	/*
+	 * OUTPUT keeps the upstream default (the file name without its
+	 * extension), because a sample control file describes a *file*: the
+	 * relation to load into is the user's decision, and defaulting to the
+	 * table the rows came from would silently append them back into it.
+	 * An export does know that table, so it is recorded as a comment.
+	 */
+	if (self->base.sample_output)
+		appendStringInfo(&buf, "# exported from %s\n",
+						 self->base.sample_output);
+	appendStringInfo(&buf, "OUTPUT = %s\n", filename);
+	appendStringInfo(&buf, "LOGFILE = %s.log\n", filepath);
+	appendStringInfo(&buf, "PARSE_BADFILE = %s.prs\n", filepath);
+	appendStringInfo(&buf, "DUPLICATE_BADFILE = %s.dup\n", filepath);
+	appendStringInfoString(&buf,
+						   "PARSE_ERRORS = INFINITE\n"
+						   "DUPLICATE_ERRORS = 0\n"
+						   "ON_DUPLICATE_KEEP = NEW\n"
+						   "SKIP = 0\n"
+						   "LIMIT = INFINITE\n"
+						   "CHECK_CONSTRAINTS = NO\n"
+						   "MULTI_PROCESS = YES\n"
+						   "VERBOSE = NO\n"
+						   "TRUNCATE = NO\n"
+						   "WRITER = DIRECT\n"
+						   "TYPE = BINARY\n");
+	BinaryDumpParams(self->fields, self->nfield, &buf, "COL");
+	appendStringInfo(&buf, "# ENCODING = %s\n", GetDatabaseEncodingName());
+
+	pfree(filename);
+	return buf.data;
 }
 
 static int

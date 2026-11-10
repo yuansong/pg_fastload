@@ -79,7 +79,7 @@ Other sizes, the fixed-length format and cold-cache results: [docs/BENCHMARK.md]
 | Skip spool work on unindexed tables | ✗ | ✓ (`SpoolerInsert()` early return, ~0.28 s/1 GiB) |
 | Per-row error tolerance + badfile | ✓ | ✓ (serial path; the parallel path fails the load instead) |
 | Load progress reporting | ✗ | ✓ (published for every load; read it from any session via `pgfastload.pg_fastload_progress` — see [USER_MANUAL §12.4](docs/USER_MANUAL.md#124-load-progress)) |
-| Table export (CSV / BINARY / FIXED) | ✗ | ✓ (`pgfastload.pg_fastload_export()`; CSV is byte-identical to `COPY ... TO`, see [§4.6](#46-the-other-direction-export-a-table-to-csv--binary--fixed)) |
+| Table export (CSV / BINARY / FIXED) | ✗ | ✓ (`pgfastload.pg_fastload_export()`; parallel by default for `TABLE=`, 9.60× on 16 cores; CSV is byte-identical to `COPY ... TO` on the serial path — see [§4.6](#46-the-other-direction-export-a-table-to-csv--binary--fixed)) |
 | Every original control keyword | ✓ | ✓ (unchanged semantics, incl. `WRITER=PARALLEL`) |
 
 ### 2.3 Usage
@@ -319,7 +319,7 @@ A load is "file → table"; an export is "table → file", sharing the same Writ
 `COL`/`OUT_COL` layout description:
 
 ```sql
--- CSV: byte-identical to COPY ... TO ... (FORMAT csv)
+-- CSV: byte-identical to COPY ... TO ... (FORMAT csv) on the serial path
 SELECT pgfastload.pg_fastload_export(ARRAY[
   'TABLE=public.order_line',
   'OUTPUT=/tmp/order_line.csv',
@@ -347,10 +347,14 @@ Returns `bigint` (rows written). Points worth knowing:
   replace `TABLE=`;
 - the target is a server-side absolute path that must not exist yet — nothing is ever overwritten;
   superuser is required;
-- single-process serial (no `PARALLEL`). 8M rows / 312 MiB from page cache: **0.90 s** (≈363 MB/s)
-  against server-side `COPY TO`'s 0.80 s, with `cmp`-identical output. It is CPU-bound in one backend,
-  not I/O-bound: see [BENCHMARK §8](docs/BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to)
-  for the breakdown;
+- **parallel by default for `TABLE=`**: N query workers format rows and one dedicated writer process
+  appends them, mirroring the load's process model. 7.4M rows / 1.13 GiB to tmpfs: serial 4.08 s →
+  15 workers **0.42 s (9.60×)**; `PARALLEL=OFF` keeps the single-process path, `QUERY=` always uses it;
+- **row order is not preserved** by a parallel export (workers append in arrival order) — the file is a
+  complete dump, not a sorted one. Compare row sets, not bytes, and use `QUERY=` when order matters;
+- the serial path is still CPU-bound in one backend, not I/O-bound: 8M rows / 312 MiB from page cache in
+  **0.90 s** (≈363 MB/s) vs server-side `COPY TO`'s 0.80 s with `cmp`-identical output. Breakdown and
+  the scaling curve: [BENCHMARK §8](docs/BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to);
 - a fixed-width field is padded with spaces, and the loader trims it back with `COL=CHAR(n)` but keeps
   it with `COL=VARCHAR(n)` — use `CHAR(n)` when you want the round trip (at the cost of losing trailing
   blanks of the original value). Details and limits:
@@ -422,6 +426,8 @@ Downgrading is a **safety net, not an error**: `PARALLEL=ON` is always safe to e
 - **Verified on**: PostgreSQL 15.19 / 16.15 / 17.11 / 18.6 / 19rc1, x86_64 Linux, 16 vCPU. All five
   majors were run through the same functional suite (`util/fl_ver_test.sh`): serial vs parallel CSV,
   serial vs parallel fixed length, the `FILTER` downgrade, parse-error handling and the CLI client.
+  The export suites also run on all five (`util/fl_export_test.sh` 39 assertions,
+  `util/fl_export_parallel_test.sh` 33 assertions — 165/165 for the parallel one).
   Every difference and its fix is listed in [docs/PORTING.md](docs/PORTING.md). **One branch
   (`master`) serves all five majors** — version differences are resolved by `PG_VERSION_NUM` at
   compile time, and `include/pg_fastload.h` rejects anything older than 15 with `#error`.

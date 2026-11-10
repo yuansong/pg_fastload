@@ -80,7 +80,8 @@ lib/writer_buffered.c    BUFFERED
 lib/writer_binary.c      fixed-width file writer (shared by WRITER=BINARY and export)
 lib/writer_csv.c         the other half: CSV file writer (export only)
 lib/writer_parallel.c    PARALLEL (upstream "read here, write there" multi-process)
-lib/export.c             export entry pgfastload.pg_fastload_export(): SPI cursor scan → Writer
+lib/export.c             export entry pgfastload.pg_fastload_export(): option parsing, request
+                         resolution, serial SPI cursor scan → Writer, parallel dispatch
 lib/pg_btree.c           batched index spool build
 lib/progress.c           load/export progress: status records + the pg_fastload_progress SRF
 lib/pgut/*               upstream utility library (the PARALLEL writer depends on pgut-ipc.c)
@@ -91,7 +92,11 @@ lib/fastload_parallel.c  orchestration: DSM/queue creation, bgworker registratio
                          FastloadParallelRun() (leader consume loop),
                          FastloadDefaultWorkers() (single definition of the default)
 lib/fastload_worker.c    reader single-pass scan/routing + worker consume/parse/return
+lib/export_parallel.c    export orchestration: DSM + per-worker shm_mq, writer bgworker
+                         (write + fsync only), query bgworkers (block-range scan + format),
+                         FlExportParallelSupported() / FlExportParallelTry()
 include/fastload_parallel.h  DSM layout, parameter/header structs, key constants, queue sizes
+include/export_parallel.h    export DSM layout: FlExportShared / FlExportParams / FlExportChunk
 include/pg_profile.h     USE_PROFILE=1 stage timers
 ```
 
@@ -111,7 +116,7 @@ Identical to upstream `pg_bulkload`. This path received only two changes unrelat
 default worker count now comes from the shared `FastloadDefaultWorkers()`, and `SpoolerInsert()`
 returns early when the table has no indexes.
 
-### 4.1 The other direction: export data flow
+### 4.1 The other direction: serial export data flow (`PARALLEL=OFF`)
 
 An export never touches `Reader`/`Parser` (those turn bytes into tuples); it starts from tuples that
 already exist:
@@ -132,10 +137,77 @@ Three constraints shape it:
 | Tuples pass `wt->tchecker->checker` before `BinaryWriter` | a load takes the row type from the target `TupleDesc`; cursor tuples may carry no type OID, so `BinaryWriterSetSourceDesc()` hands the result `TupleDesc` over explicitly and the same call turns on width/range checking |
 | CSV gets its own writer, fixed-width reuses `BinaryWriter` | there was never a "write CSV" implementation (only `parser_csv.c`), while the fixed-width descriptor `COL` already existed — `OUT_COL` is its mirror image |
 
-An export is **not parallel**: the source is a cursor (one statement, one snapshot) and the target is
-a single file, so there is no repeated-file-read amplification to spread over workers; moving the
-reader/worker machinery in would only add IPC. Throughput is in the `COPY TO` class (see
-[BENCHMARK](BENCHMARK.md)).
+This path is what `QUERY=` always uses, and what `TABLE=` uses when it cannot be split (§4.2).
+
+### 4.2 The parallel mirror image (`PARALLEL=ON`, the default for `TABLE=`)
+
+The load pipeline is *one reader → N parsers → 1 serial insert*. The export pipeline is its exact
+mirror: **N query workers → 1 writer process**, where the writer is the only serial stage and it does
+nothing but `write(2)`.
+
+```
+leader (orchestration only: DSM, worker launch, progress, sample .ctl)
+   │
+   ├─ launches writer bgworker, then N query bgworkers
+   │
+query worker 0 ──shm_mq 0──┐
+query worker 1 ──shm_mq 1──┤
+      ...                  ├──→ writer process ──→ OUTPUT file
+query worker N-1 ──shm_mq N┘        (fsync, then reports rows/bytes)
+```
+
+Everything that costs CPU lives with the workers: heap scan, tuple deforming, `OutputFunctionCall`,
+and — for CSV — the quoting state machine. Those four terms are the whole cost of a serial export
+(§[BENCHMARK §8](BENCHMARK.md)), which is why moving them behind a process boundary is a net win
+even though every formatted byte is copied through shared memory once.
+
+| Concern | Parallel export | Parallel load (§5) |
+|---|---|---|
+| Fan-out / fan-in | N workers → 1 writer | 1 reader → N workers |
+| Serial stage | writer process (`write` + `fsync`) | leader (`WriterInsert`) |
+| Data crossing the boundary | already-formatted bytes | raw records (bytes) or fixed-width rows |
+| Partition key | ctid **block range** (`heap_setscanlimits`) | byte offsets in the input file |
+| Order | **not preserved** (arrival order) | preserved |
+| `QUERY=` | falls back to serial | n/a |
+| Progress source | writer's byte/row counters | per-worker counters |
+
+#### Splitting the scan
+
+Each worker gets a `FlExportWorkerId {worker_id, start, nblocks}` in `bgw_extra` and runs
+
+```c
+scan = FL_TABLE_BEGINSCAN(rel, snap);
+heap_setscanlimits(scan, wid.start, wid.nblocks);
+```
+
+`heap_setscanlimits()` blocks are physical, not logical: a range yields every *visible* tuple whose
+ctid falls in it, in whatever order the visibility map and the last-used buffer let it. So the
+partition is disjoint and complete without any runtime coordination between workers — no shared
+work queue, no stealing, no locks. Blocks are distributed as evenly as integer division allows
+(`nblocks / nworkers`, remainder to the first workers).
+
+Nothing else is shared: each worker opens the relation itself, restores the leader's serialized
+snapshot (`RestoreSnapshot`), and rebuilds its own writer from the option blob.
+
+#### Why a block range instead of `ctid BETWEEN`
+
+A `ctid` predicate would push the filter into the executor, so every worker would still scan every
+page and throw most of it away — N× read amplification instead of 1×. `heap_setscanlimits()` moves the
+range into the scan descriptor itself: each worker starts at its own block and stops at its own end.
+
+#### Order is not preserved
+
+Query workers append whatever their range yields, and the writer appends in **arrival order**. The
+file is therefore a valid, complete dump whose row order depends on scheduling. This is the documented
+contract ([USER_MANUAL §18.1](USER_MANUAL.md)), it is what makes the design lock-free on the data
+path, and it is why the acceptance test compares outputs as sets rather than byte-for-byte
+(`util/fl_export_parallel_test.sh`). Anything order-sensitive belongs in `QUERY=` (serial path) or in
+a later `ORDER BY` on the reloaded table.
+
+`LIMIT=` is still exact: workers reserve slices of a shared budget with
+`pg_atomic_fetch_add_u64(&rows_reserved, CHUNK_ROWS)`, over-reserve freely, and the last worker
+truncates its chunk to the remaining budget. `LIMIT=n` therefore returns exactly `n` rows — a subset,
+since order is not preserved.
 
 ---
 
@@ -292,6 +364,19 @@ so it stays in the build). Everything uses native primitives:
 key ranges can never collide regardless of worker count. `FASTLOAD_MAX_WORKERS = 64` also bounds the
 `FastloadShared` arrays.
 
+The export direction uses its **own** DSM segment (`FL_EXPORT_SHM_MAGIC`), so an export and a load can
+never attach each other's memory:
+
+| key | Object | Size | Contents |
+|---|---|---|---|
+| 0 | `FlExportShared` | ~17 KiB | `slock_t mutex`, `nworkers`, `writer_state`, `writer_error[256]`, `worker_state[]`, `worker_rows[]`, `worker_error[][]`, `rows_written`, `bytes_written`, `abort_requested`, `pg_atomic_uint64 rows_reserved` |
+| 1 | `FlExportParams` | variable | `nworkers`, `type`, `natts`, `limit`, `header`, `relid`, `nblocks`, plus three blobs in `data[]`: header text, `SerializeSnapshot` output, and the writer option list (`KEY\0value\0`) |
+| 2 .. 2+N-1 | `shm_mq` × N | 2 MiB each | worker → writer, one `FlExportChunk` header followed by `nbytes` of already-formatted output |
+
+`FlExportChunk { int32 nrows; int32 nbytes; }` precedes each payload. The writer does not parse rows —
+it appends `nbytes` and adds up `nrows` — so a chunk is a pure byte run and the writer has no
+format-specific code path.
+
 ### 7.2 EOF and failure detection
 
 A clean end must be distinguishable from a crash, otherwise a worker would mistake "the reader died"
@@ -311,6 +396,23 @@ leader sees SHM_MQ_DETACHED (worker side):
 
 PostgreSQL guarantees that a receiver may still drain remaining messages after the sender detaches, so
 "a worker finished before the leader attached" is not an error path.
+
+The export direction detects failure the same way but in the opposite direction of travel:
+
+```
+writer, clean:   writer_state = FL_WORKER_DONE, rows_written/bytes_written published
+writer, failure: writer_state = FL_WORKER_FAILED + writer_error[] (e.g. ENOSPC, EACCES) → close(fd) → exit
+worker, failure: worker_state[i] = FL_WORKER_FAILED + worker_error[i] → detach → exit
+worker sees SHM_MQ_DETACHED: fl_export_send_chunk() returns false → stop early, no error of its own
+leader polling:
+    writer_state == FAILED → set abort_requested, read writer_error[], ereport(ERROR)
+    writer_state == DONE   → require every worker to be DONE, then return rows/bytes
+```
+
+`abort_requested` is how a writer failure stops the workers: they re-read it once per chunk, so a
+broken output file costs at most one chunk of work per worker instead of a full scan. A failing
+worker, by contrast, never needs to stop its peers — the writer just ends up with fewer rows and the
+leader reports the worker's error instead of a row count.
 
 ---
 

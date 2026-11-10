@@ -30,12 +30,20 @@
  */
 #include "pg_fastload.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "access/reloptions.h"
+#include "access/table.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "commands/dbcommands.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "storage/fd.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -45,6 +53,7 @@
 
 #include "binary.h"
 #include "export.h"
+#include "export_parallel.h"
 #include "logger.h"
 #include "progress.h"
 #include "pg_profile.h"
@@ -73,11 +82,17 @@ typedef struct ExportOptions
 	bool	progress_notice;	/**< also print NOTICE lines? */
 	int		progress_interval;	/**< publish cadence, 0 => default */
 	int		noutcol;		/**< number of OUT_COL declarations */
+	bool	parallel;		/**< PARALLEL=, default ON for TABLE= */
+	int		parallel_workers;	/**< PARALLEL_WORKERS=, 0 => default */
+	StringInfo writer_opts;	/**< writer keywords replayed in workers */
 } ExportOptions;
 
 static void ParseExportOptions(Datum options, ExportOptions *eo, Writer **wt);
 static void DumpExportParams(ExportOptions *eo, Writer *wt, const char *query);
 static void CheckOutCol(const char *value);
+static Oid ResolveExportRelid(const char *name);
+static bool ExportParallelAttempt(ExportOptions *eo, Writer *wt, TupleDesc *desc,
+								  int64 *rows, int64 *bytes);
 
 static char *timeval_to_cstring(struct timeval tp);
 
@@ -139,6 +154,8 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		int			ret;
+		bool		parallel_ran = false;
+		int64		par_bytes = 0;
 
 		ProgressInfo	pinfo;
 
@@ -154,106 +171,134 @@ pg_fastload_export(PG_FUNCTION_ARGS)
 		pinfo.interval_ms = eo.progress_interval;
 		pinfo.limit_rows = eo.limit;
 
-		ret = SPI_connect();
-		if (ret != SPI_OK_CONNECT)
-			elog(ERROR, "SPI_connect failed: %s", SPI_result_code_string(ret));
 
 		/*
-		 * A read-only cursor runs under the caller's snapshot, which is what
-		 * a plain SELECT of the same query would see, and it refuses
-		 * anything that is not a plain SELECT.
+		 * Parallel attempt first: N query workers scan disjoint block ranges
+		 * and a dedicated writer process appends their bytes to the file
+		 * (lib/export_parallel.c).  ExportParallelAttempt() returns false when
+		 * the source cannot be split -- QUERY=, a partitioned or foreign table,
+		 * a table too small to be worth the fan-out -- in which case the serial
+		 * cursor below runs exactly as before.
 		 */
-		portal = SPI_cursor_open_with_args(NULL, query, 0, NULL, NULL, NULL,
-										   true, 0);
-		if (portal == NULL)
-			elog(ERROR, "could not open cursor: %s",
-				 SPI_result_code_string(SPI_result));
+		if (eo.parallel && eo.table != NULL)
+			parallel_ran = ExportParallelAttempt(&eo, wt, &desc, &count,
+												 &par_bytes);
+		else if (eo.parallel && eo.query != NULL)
+			LoggerLog(INFO, "pg_fastload: export PARALLEL disabled (QUERY= "
+					  "cannot be split by block range), using the serial "
+					  "path\n");
 
-		desc = portal->tupDesc;
-		if (desc == NULL)
-			elog(ERROR, "could not determine the result row type");
-
-		if (binary && eo.noutcol != desc->natts)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("OUT_COL declares %d column(s) but the export "
-							"produces %d", eo.noutcol, desc->natts)));
-
-		/* CSV formats whatever the query returns, names included. */
-		if (!binary)
-			wt->desc = desc;
-
-		WriterInit(wt);
-
-		/*
-		 * BINARY/FIXED: the target layout comes from OUT_COL, so the source
-		 * descriptor has to be handed to the checker explicitly.  Deriving it
-		 * from the tuple header instead (what a load does) is not possible
-		 * here: a tuple delivered by a cursor may carry no type OID at all.
-		 */
-		if (binary)
-			BinaryWriterSetSourceDesc(wt, desc);
-
-		ProgressInit(&pinfo);
-
-		rowcxt = AllocSetContextCreate(ccxt, "pg_fastload export row",
-									   ALLOCSET_DEFAULT_SIZES);
-
-		for (;;)
+		if (parallel_ran)
 		{
-			long		nrows;
-			int			i;
+			/* The rows are already on disk; only the bookkeeping is left. */
+			ProgressFinish(count, par_bytes);
 
-			CHECK_FOR_INTERRUPTS();
-
-			SPI_cursor_fetch(portal, true, FL_EXPORT_FETCH_ROWS);
-			nrows = SPI_processed;
-
-			if (nrows == 0)
-			{
-				SPI_freetuptable(SPI_tuptable);
-				break;
-			}
-
-			for (i = 0; i < nrows && count < eo.limit; i++)
-			{
-				HeapTuple	tuple = SPI_tuptable->vals[i];
-
-				MemoryContextSwitchTo(rowcxt);
-
-				/*
-				 * BINARY/FIXED: convert the source row to the OUT_COL layout
-				 * first (the checker also enforces the column width and the
-				 * unsigned ranges), then let the writer lay the bytes out.
-				 */
-				if (binary)
-					tuple = wt->tchecker->checker(wt->tchecker, tuple,
-												  &fieldno);
-
-				WriterInsert(wt, tuple);
-				wt->count++;
-				count++;
-
-				ProgressUpdate(count, wt->bytes);
-
-				MemoryContextSwitchTo(ccxt);
-				MemoryContextReset(rowcxt);
-			}
-
-			SPI_freetuptable(SPI_tuptable);
-
-			if (count >= eo.limit)
-				break;
+			WriterClose(wt, false);
+			wt = NULL;
 		}
+		else
+		{
+			ret = SPI_connect();
+			if (ret != SPI_OK_CONNECT)
+				elog(ERROR, "SPI_connect failed: %s", SPI_result_code_string(ret));
 
-		ProgressFinish(count, wt->bytes);
+			/*
+			 * A read-only cursor runs under the caller's snapshot, which is what
+			 * a plain SELECT of the same query would see, and it refuses
+			 * anything that is not a plain SELECT.
+			 */
+			portal = SPI_cursor_open_with_args(NULL, query, 0, NULL, NULL, NULL,
+											   true, 0);
+			if (portal == NULL)
+				elog(ERROR, "could not open cursor: %s",
+					 SPI_result_code_string(SPI_result));
 
-		MemoryContextDelete(rowcxt);
+			desc = portal->tupDesc;
+			if (desc == NULL)
+				elog(ERROR, "could not determine the result row type");
 
-		WriterClose(wt, false);
-		wt = NULL;
+			if (binary && eo.noutcol != desc->natts)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("OUT_COL declares %d column(s) but the export "
+								"produces %d", eo.noutcol, desc->natts)));
 
-		SPI_finish();
+			/* CSV formats whatever the query returns, names included. */
+			if (!binary)
+				wt->desc = desc;
+
+			WriterInit(wt);
+
+			/*
+			 * BINARY/FIXED: the target layout comes from OUT_COL, so the source
+			 * descriptor has to be handed to the checker explicitly.  Deriving it
+			 * from the tuple header instead (what a load does) is not possible
+			 * here: a tuple delivered by a cursor may carry no type OID at all.
+			 */
+			if (binary)
+				BinaryWriterSetSourceDesc(wt, desc);
+
+			ProgressInit(&pinfo);
+
+			rowcxt = AllocSetContextCreate(ccxt, "pg_fastload export row",
+										   ALLOCSET_DEFAULT_SIZES);
+
+			for (;;)
+			{
+				long		nrows;
+				int			i;
+
+				CHECK_FOR_INTERRUPTS();
+
+				SPI_cursor_fetch(portal, true, FL_EXPORT_FETCH_ROWS);
+				nrows = SPI_processed;
+
+				if (nrows == 0)
+				{
+					SPI_freetuptable(SPI_tuptable);
+					break;
+				}
+
+				for (i = 0; i < nrows && count < eo.limit; i++)
+				{
+					HeapTuple	tuple = SPI_tuptable->vals[i];
+
+					MemoryContextSwitchTo(rowcxt);
+
+					/*
+					 * BINARY/FIXED: convert the source row to the OUT_COL layout
+					 * first (the checker also enforces the column width and the
+					 * unsigned ranges), then let the writer lay the bytes out.
+					 */
+					if (binary)
+						tuple = wt->tchecker->checker(wt->tchecker, tuple,
+													  &fieldno);
+
+					WriterInsert(wt, tuple);
+					wt->count++;
+					count++;
+
+					ProgressUpdate(count, wt->bytes);
+
+					MemoryContextSwitchTo(ccxt);
+					MemoryContextReset(rowcxt);
+				}
+
+				SPI_freetuptable(SPI_tuptable);
+
+				if (count >= eo.limit)
+					break;
+			}
+
+			ProgressFinish(count, wt->bytes);
+
+			MemoryContextDelete(rowcxt);
+
+			WriterClose(wt, false);
+			wt = NULL;
+
+			SPI_finish();
+		}
 	}
 	PG_CATCH();
 	{
@@ -311,6 +356,7 @@ ParseExportOptions(Datum options, ExportOptions *eo, Writer **wt)
 	memset(eo, 0, sizeof(ExportOptions));
 	eo->limit = INT64_MAX;
 	eo->progress = true;		/* publish unless asked not to */
+	eo->parallel = true;		/* TABLE= exports use workers unless told not to */
 
 	defs = untransformRelOptions(options);
 
@@ -376,6 +422,21 @@ ParseExportOptions(Datum options, ExportOptions *eo, Writer **wt)
 			eo->progress_interval = (int) n;
 			eo->progress = true;
 		}
+		else if (CompareKeyword(keyword, "PARALLEL"))
+		{
+			eo->parallel = ParseBoolean(value);
+		}
+		else if (CompareKeyword(keyword, "PARALLEL_WORKERS"))
+		{
+			int64	n = ParseInt64(value, 0);
+
+			if (n < 1 || n > FL_EXPORT_MAX_WORKERS)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("PARALLEL_WORKERS must be between 1 and %d",
+								FL_EXPORT_MAX_WORKERS)));
+			eo->parallel_workers = (int) n;
+		}
 		else if (CompareKeyword(keyword, "OUT_COL"))
 		{
 			eo->noutcol++;
@@ -429,6 +490,32 @@ ParseExportOptions(Datum options, ExportOptions *eo, Writer **wt)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("invalid keyword \"%s\"", opt->defname)));
+	}
+
+	/*
+	 * The same options again, serialized as "KEY=value\0" pairs.  The query
+	 * workers rebuild their own writer from this blob so that every process
+	 * formats rows with exactly the dialect and OUT_COL layout the leader
+	 * validated -- one definition, N copies, no second parser.
+	 *
+	 * OUTPUT is left out: the workers never touch the file.  HEADER is left
+	 * out because the writer process emits the header, once, before any row
+	 * arrives -- a worker that also emitted one would duplicate it.
+	 */
+	eo->writer_opts = makeStringInfo();
+	foreach(cell, rest_defs)
+	{
+		DefElem	   *opt = lfirst(cell);
+		char	   *value = strVal(opt->arg);
+
+		if (CompareKeyword(opt->defname, "OUTPUT") ||
+			CompareKeyword(opt->defname, "HEADER") ||
+			CompareKeyword(opt->defname, "VERBOSE"))
+			continue;
+
+		appendBinaryStringInfo(eo->writer_opts, opt->defname,
+							   strlen(opt->defname) + 1);
+		appendBinaryStringInfo(eo->writer_opts, value, strlen(value) + 1);
 	}
 
 	if (eo->table == NULL && eo->query == NULL)
@@ -547,3 +634,184 @@ timeval_to_cstring(struct timeval tp)
 											  TimestampTzGetDatum(tz)));
 	return str;
 }
+
+/* ========================================================================
+ * Parallel export
+ * ========================================================================*/
+
+/**
+ * @brief Resolve TABLE= to an OID without going through SPI.
+ *
+ * The name may be schema-qualified.  Quoted identifiers are not handled here;
+ * FlExportParallelSupported() rejects them and the serial path runs instead.
+ */
+static Oid
+ResolveExportRelid(const char *name)
+{
+	char	   *copy = pstrdup(name);
+	char	   *dot = strrchr(copy, '.');
+	char	   *schemaname = NULL;
+	RangeVar   *rv;
+	Oid			relid;
+
+	if (dot != NULL)
+	{
+		*dot = '\0';
+		schemaname = copy;
+		copy = dot + 1;
+	}
+
+	rv = makeRangeVar(schemaname, copy, -1);
+	relid = RangeVarGetRelid(rv, AccessShareLock, true);
+
+	return relid;
+}
+
+/**
+ * @brief Run the parallel export when the source can be split.
+ * @return true when the rows are on disk, false to fall back to the cursor.
+ */
+static bool
+ExportParallelAttempt(ExportOptions *eo, Writer *wt, TupleDesc *desc,
+					  int64 *rows, int64 *bytes)
+{
+	Oid				relid;
+	Relation		rel;
+	FlExportRequest	req;
+	ProgressInfo	pinfo;
+	bool			ok = false;
+	int				ctl_fd = -1;
+	TupleDesc		tdesc;
+
+	relid = ResolveExportRelid(eo->table);
+	if (!OidIsValid(relid))
+	{
+		LoggerLog(INFO, "pg_fastload: export PARALLEL disabled (relation "
+				  "\"%s\" not found), using the serial path\n", eo->table);
+		return false;
+	}
+
+	rel = table_open(relid, AccessShareLock);
+
+	if (rel->rd_rel->relkind != RELKIND_RELATION)
+	{
+		LoggerLog(INFO, "pg_fastload: export PARALLEL disabled (\"%s\" is not "
+				  "a plain table), using the serial path\n", eo->table);
+		table_close(rel, AccessShareLock);
+		return false;
+	}
+
+	tdesc = RelationGetDescr(rel);
+
+	if (eo->noutcol != 0 && pg_strcasecmp(eo->type, "CSV") != 0 &&
+		eo->noutcol != tdesc->natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("OUT_COL declares %d column(s) but the export "
+						"produces %d", eo->noutcol, tdesc->natts)));
+
+	memset(&req, 0, sizeof(req));
+	req.relname = eo->table;
+	req.output = eo->output;
+	req.type = (pg_strcasecmp(eo->type, "CSV") == 0) ? FL_EXPORT_TYPE_CSV
+		: FL_EXPORT_TYPE_BINARY;
+	req.nworkers = eo->parallel_workers;
+	req.limit = eo->limit;
+	req.header = (req.type == FL_EXPORT_TYPE_CSV) && wt->header;
+	req.relid = relid;
+	req.nblocks = RelationGetNumberOfBlocks(rel);
+	req.desc = tdesc;
+	req.wt = wt;
+	req.writer_opts = eo->writer_opts;
+
+	/* CSV formats whatever the relation has, names included. */
+	if (req.type == FL_EXPORT_TYPE_CSV)
+		wt->desc = tdesc;
+
+	if (!FlExportParallelSupported(&req))
+	{
+		LoggerLog(INFO, "pg_fastload: export PARALLEL disabled (%s), using the "
+				  "serial path\n",
+				  req.nblocks < 32 ? "the table is too small" : "workers=1");
+		table_close(rel, AccessShareLock);
+		return false;
+	}
+
+	/*
+	 * Claim the sample control file before any row is written, exactly as the
+	 * serial path does at WriterInit() time: an existing .ctl must fail the
+	 * export before it produces a data file nobody asked for.
+	 */
+	if (req.type == FL_EXPORT_TYPE_BINARY)
+	{
+		char		path[MAXPGPATH];
+
+		snprintf(path, MAXPGPATH, "%s.ctl", eo->output);
+		ctl_fd = BasicOpenFilePerm(path,
+								   O_WRONLY | O_CREAT | O_EXCL | PG_BINARY,
+								   S_IRUSR | S_IWUSR);
+		if (ctl_fd < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not create sample control file \"%s\": %m",
+							path)));
+	}
+
+	memset(&pinfo, 0, sizeof(pinfo));
+	pinfo.direction = "export";
+	pinfo.infile = eo->output;
+	pinfo.datname = get_database_name(MyDatabaseId);
+	pinfo.relname = eo->table;
+	pinfo.type = eo->type;
+	pinfo.mode = "parallel";
+	pinfo.enabled = eo->progress;
+	pinfo.notice = eo->progress_notice;
+	pinfo.interval_ms = eo->progress_interval;
+	pinfo.limit_rows = eo->limit;
+
+	PG_TRY();
+	{
+		ProgressInit(&pinfo);
+		ok = FlExportParallelTry(&req, rows, bytes);
+	}
+	PG_CATCH();
+	{
+		ProgressAbort();
+		if (ctl_fd >= 0)
+			close(ctl_fd);
+		table_close(rel, AccessShareLock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	table_close(rel, AccessShareLock);
+
+	*desc = tdesc;
+
+	if (ok && ctl_fd >= 0)
+	{
+		char	   *text;
+
+		/* The body embeds the number of columns, not the number of rows. */
+		wt->count = *rows;
+		text = BinaryWriterBuildSampleCtl(wt);
+		if (text != NULL)
+		{
+			if (write(ctl_fd, text, strlen(text)) != (ssize_t) strlen(text))
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not write to sample control file: %m")));
+			pfree(text);
+		}
+		close(ctl_fd);
+	}
+
+	return ok;
+}
+
+/**
+ * @brief Write the sample control file the parallel path claimed earlier.
+ *
+ * Removed: the parallel path writes it inside ExportParallelAttempt(), right
+ * after the writer process reports its row count.
+ */

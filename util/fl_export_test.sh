@@ -205,8 +205,17 @@ echo "$E4" | grep -q "FIXED writes text only" && pass "FIXED with INTEGER reject
 E5=$(err "SELECT pgfastload.pg_fastload_export(ARRAY['TABLE=public.exp_t','OUTPUT=$D/e5.bin','TYPE=BINARY','OUT_COL=INTEGER'])")
 echo "$E5" | grep -q "OUT_COL declares 1 column" && pass "OUT_COL count mismatch rejected" || fail "count mismatch: $E5"
 
+# The server localises "File exists" (lc_messages), so the assertion is on the
+# behaviour instead of the wording: the call must fail and the file must keep
+# its original contents.
+SIZE6=$(stat -c %s "$D/exp.csv" 2>/dev/null || echo missing)
 E6=$(err "SELECT pgfastload.pg_fastload_export(ARRAY['TABLE=public.exp_t','OUTPUT=$D/exp.csv','TYPE=CSV'])")
-echo "$E6" | grep -qi "exists\|File exists" && pass "existing OUTPUT not overwritten" || fail "existing OUTPUT: $E6"
+if [ "$SIZE6" != "missing" ] && echo "$E6" | grep -q "^ERROR" && \
+   [ "$(stat -c %s "$D/exp.csv" 2>/dev/null)" = "$SIZE6" ]; then
+	pass "existing OUTPUT not overwritten"
+else
+	fail "existing OUTPUT: $E6"
+fi
 
 E7=$(err "SELECT pgfastload.pg_fastload_export(ARRAY['TABLE=public.exp_null','OUTPUT=$D/e7.bin','TYPE=BINARY','OUT_COL=INTEGER','OUT_COL=CHAR(4)'])")
 echo "$E7" | grep -q "no representation" && pass "NULL without NULLIF rejected" || fail "NULL without NULLIF: $E7"

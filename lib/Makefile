@@ -6,6 +6,7 @@
 SRCS = \
 	binary.c \
 	export.c \
+	export_parallel.c \
 	fastload_parallel.c \
 	fastload_worker.c \
 	logger.c \

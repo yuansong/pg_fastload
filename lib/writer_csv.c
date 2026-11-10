@@ -49,6 +49,8 @@ typedef struct CsvWriter
 
 	int		fd;				/**< output file descriptor */
 	StringInfoData buf;		/**< output buffer, holds whole rows */
+	StringInfo	sink;		/**< non-NULL: append rows here instead of buf,
+								 * no file is opened (parallel export) */
 
 	char	delim;			/**< field separator */
 	char	quote;			/**< quotation character */
@@ -73,6 +75,18 @@ static void	CsvWriterDumpParams(CsvWriter *self);
 static void csv_open(CsvWriter *self);
 static void csv_flush(CsvWriter *self);
 static void csv_put_field(CsvWriter *self, const char *str, bool header);
+static void csv_setup(CsvWriter *self);
+static void csv_header_line(CsvWriter *self, StringInfo out);
+
+/**
+ * @brief Where a formatted row goes: the sink when one is installed, else the
+ * writer's own file buffer.
+ */
+static StringInfo
+csv_out(CsvWriter *self)
+{
+	return self->sink ? self->sink : &self->buf;
+}
 
 /* ========================================================================
  * Implementation
@@ -110,11 +124,42 @@ CreateCsvWriter(void *opt)
 static void
 CsvWriterInit(CsvWriter *self)
 {
+	csv_setup(self);
+
+	initStringInfo(&self->buf);
+	enlargeStringInfo(&self->buf, 64 * 1024);
+
+	self->base.context = AllocSetContextCreate(CurrentMemoryContext,
+											   "CsvWriter",
+											   ALLOCSET_DEFAULT_SIZES);
+
+	csv_open(self);
+
+	if (self->header)
+	{
+		csv_header_line(self, &self->buf);
+		csv_flush(self);
+	}
+}
+
+/**
+ * @brief Everything CsvWriterInit() does except touching the output file.
+ *
+ * Split out for the parallel export, where the row is formatted in a query
+ * worker and written by a separate process: the worker needs the dialect, the
+ * resolved output functions and the deform buffers, but must not create the
+ * file.  Idempotent, because the parallel leader also calls it to build the
+ * header line before any worker exists.
+ */
+static void
+csv_setup(CsvWriter *self)
+{
 	TupleDesc	desc = self->base.desc;
 	int			i;
 	Oid			outfunc;
 
-	Assert(self->base.truncate == false);
+	if (self->outfuncs != NULL)
+		return;
 
 	if (desc == NULL)
 		elog(ERROR, "CSV writer needs a source tuple descriptor");
@@ -158,28 +203,54 @@ CsvWriterInit(CsvWriter *self)
 		getTypeOutputInfo(att->atttypid, &outfunc, &isvarlena);
 		fmgr_info(outfunc, &self->outfuncs[i]);
 	}
+}
 
-	initStringInfo(&self->buf);
-	enlargeStringInfo(&self->buf, 64 * 1024);
+/**
+ * @brief Render the header line into @a out (row formatting rules apply).
+ */
+static void
+csv_header_line(CsvWriter *self, StringInfo out)
+{
+	TupleDesc	desc = self->base.desc;
+	int			i;
 
-	self->base.context = AllocSetContextCreate(CurrentMemoryContext,
-											   "CsvWriter",
-											   ALLOCSET_DEFAULT_SIZES);
-
-	csv_open(self);
-
-	if (self->header)
+	for (i = 0; i < self->natts; i++)
 	{
-		for (i = 0; i < self->natts; i++)
-		{
-			Form_pg_attribute att = TupleDescAttr(desc, i);
+		Form_pg_attribute att = TupleDescAttr(desc, i);
 
-			if (i > 0)
-				appendStringInfoCharMacro(&self->buf, self->delim);
-			csv_put_field(self, NameStr(att->attname), true);
-		}
-		appendStringInfoCharMacro(&self->buf, '\n');
+		if (i > 0)
+			appendStringInfoCharMacro(out, self->delim);
+		csv_put_field(self, NameStr(att->attname), true);
 	}
+	appendStringInfoCharMacro(out, '\n');
+}
+
+void
+CsvWriterPrepare(Writer *writer)
+{
+	CsvWriter  *self = (CsvWriter *) writer;
+
+	csv_setup(self);
+}
+
+void
+CsvWriterSetSink(Writer *writer, StringInfo sink)
+{
+	CsvWriter  *self = (CsvWriter *) writer;
+
+	self->sink = sink;
+}
+
+void
+CsvWriterAppendHeader(Writer *writer, StringInfo out)
+{
+	CsvWriter  *self = (CsvWriter *) writer;
+	StringInfo	save = self->sink;
+
+	/* csv_put_field() targets the sink, so point it at the caller's buffer */
+	self->sink = out;
+	csv_header_line(self, out);
+	self->sink = save;
 }
 
 /**
@@ -241,6 +312,7 @@ csv_put_field(CsvWriter *self, const char *str, bool header)
 {
 	const char *p;
 	bool		need_quote = false;
+	StringInfo	out = csv_out(self);
 
 	if (*str == '\0')
 		need_quote = (header || self->nullstr_len == 0);
@@ -262,18 +334,18 @@ csv_put_field(CsvWriter *self, const char *str, bool header)
 
 	if (!need_quote)
 	{
-		appendStringInfoString(&self->buf, str);
+		appendStringInfoString(out, str);
 		return;
 	}
 
-	appendStringInfoCharMacro(&self->buf, self->quote);
+	appendStringInfoCharMacro(out, self->quote);
 	for (p = str; *p != '\0'; p++)
 	{
 		if (*p == self->quote || *p == self->escape)
-			appendStringInfoCharMacro(&self->buf, self->escape);
-		appendStringInfoCharMacro(&self->buf, *p);
+			appendStringInfoCharMacro(out, self->escape);
+		appendStringInfoCharMacro(out, *p);
 	}
-	appendStringInfoCharMacro(&self->buf, self->quote);
+	appendStringInfoCharMacro(out, self->quote);
 }
 
 /**
@@ -282,10 +354,12 @@ csv_put_field(CsvWriter *self, const char *str, bool header)
 static void
 CsvWriterInsert(CsvWriter *self, HeapTuple tuple)
 {
-	int		i;
-	bool	first = true;
+	int			i;
+	bool		first = true;
+	StringInfo	out = csv_out(self);
 
-	if (self->buf.len >= CSV_FLUSH_THRESHOLD)
+	/* With a sink installed the caller decides when and how to flush. */
+	if (self->sink == NULL && self->buf.len >= CSV_FLUSH_THRESHOLD)
 		csv_flush(self);
 
 	heap_deform_tuple(tuple, self->base.desc, self->values, self->nulls);
@@ -295,14 +369,13 @@ CsvWriterInsert(CsvWriter *self, HeapTuple tuple)
 		char   *str;
 
 		if (!first)
-			appendStringInfoCharMacro(&self->buf, self->delim);
+			appendStringInfoCharMacro(out, self->delim);
 		first = false;
 
 		if (self->nulls[i])
 		{
 			/* NULL is written as the NULL string, never quoted */
-			appendBinaryStringInfo(&self->buf, self->nullstr,
-								   self->nullstr_len);
+			appendBinaryStringInfo(out, self->nullstr, self->nullstr_len);
 			continue;
 		}
 
@@ -311,7 +384,7 @@ CsvWriterInsert(CsvWriter *self, HeapTuple tuple)
 		pfree(str);
 	}
 
-	appendStringInfoCharMacro(&self->buf, '\n');
+	appendStringInfoCharMacro(out, '\n');
 
 	FASTLOAD_PROFILE(&prof_writer_table);
 }
@@ -410,6 +483,7 @@ CsvWriterParam(CsvWriter *self, const char *keyword, char *value)
 	else if (CompareKeyword(keyword, "HEADER"))
 	{
 		self->header = ParseBoolean(value);
+		self->base.header = self->header;
 	}
 	else
 		return false;	/* unknown parameter */

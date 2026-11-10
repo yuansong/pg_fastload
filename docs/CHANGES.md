@@ -600,10 +600,96 @@ builds a coerced tuple and copies every field into its declared width.
   `INTEGER`, `OUT_COL` count mismatch, existing target file, NULL without `NULLIF`, unknown keyword,
   missing `TABLE`/`QUERY`, non-`SELECT` `QUERY`, `DELIMITER` equal to `QUOTE`;
 - **progress**: while an 8M-row export runs, another session reads
-  `export|running|CSV|serial|...`, and the view is empty afterwards.
+  `export|running|CSV|serial|...`, and the view is empty afterwards. (Serial was the only mode at
+  this point; since §20.5 the same table reports `mode=parallel`.)
 
 Load-side regression: CSV 90/90 and fixed-length 44/44 are unaffected (the export only adds a writer
 and a byte counter; `WriterInsert`/`ReaderNext` paths are untouched).
+
+### 20.5 Parallel export: N query workers + 1 writer (2026-11-10)
+
+§20 stated, correctly for its time, that an export was single-process and that making it parallel would
+require per-worker temporary files plus an ordered stitch (a full extra read and write of the output).
+That estimate assumed **row order had to be preserved**. It does not: an export is a dump, and the
+caller's contract is "every row exactly once". Dropping the order requirement removes the stitch
+entirely and leaves the loader's process model usable as-is, mirrored:
+
+| Load (`PARALLEL=ON`) | Export (`PARALLEL=ON`) |
+|---|---|
+| 1 reader bgworker scans the file once | N query bgworkers scan disjoint `ctid` block ranges |
+| N parser bgworkers build tuples | N query bgworkers format rows into bytes |
+| leader (backend) does the serial `WriterInsert` | 1 writer bgworker does the serial `write(2)` + `fsync` |
+| reader → worker over `shm_mq` | worker → writer over `shm_mq`, one queue per worker |
+
+New files:
+
+| File | Content |
+|---|---|
+| `include/export_parallel.h` | DSM layout (`FlExportShared` / `FlExportParams` / `FlExportChunk`), keys, queue and chunk sizes, request struct |
+| `lib/export_parallel.c` | writer bgworker, query bgworker, `FlExportParallelSupported()` downgrade decision, `FlExportParallelTry()` orchestration |
+
+Changed files:
+
+| File | Change |
+|---|---|
+| `lib/export.c` | `PARALLEL=` / `PARALLEL_WORKERS=` parsing; writer options serialized into a `KEY\0value\0` blob; `ResolveExportRelid()` (RangeVar → Oid without SPI); `ExportParallelAttempt()` dispatches and falls back; the serial SPI cursor block is now the `else` branch |
+| `lib/writer.h`, `lib/writer_csv.c`, `lib/writer_binary.c` | split init into `Prepare` (dialect/outfuncs/OUT_COL layout, no file) + `Init` (adds the file), plus a `StringInfo` **sink**: with a sink the writer appends to caller memory and never touches a file |
+| `lib/Makefile`, `lib/exports.txt` | build `export_parallel.c`; export the two bgworker entry points (10, 11) |
+| `util/fl_export_parallel_test.sh` | new acceptance harness (33 assertions) |
+
+Three design points worth recording:
+
+1. **`heap_setscanlimits()` instead of a `ctid` predicate.** A `WHERE ctid BETWEEN ...` filter would still
+   read every page in every worker (N× amplification); the range is pushed into the scan descriptor so
+   each worker starts at its own block and stops at its own end. Partition = `nblocks * i / nworkers`,
+   computed before launch — no shared queue, no stealing, no locks on the data path.
+2. **Snapshot and writer options cross the process boundary as bytes.** Each worker calls
+   `RestoreSnapshot()` on the leader's `SerializeSnapshot()` output, so all workers see the caller's
+   snapshot (no `ctid` from a row inserted later). Writer options are replayed from the `KEY\0value\0`
+   blob because a `Writer` holds function pointers, which do not survive `fork()`/`exec` of a bgworker.
+3. **The writer stays format-agnostic.** A message is `{nrows, nbytes}` plus a byte run, so CSV and
+   BINARY share one writer; the header line is written once by the writer before the first chunk, which
+   is what makes `HEADER=ON` correct under any scheduling.
+
+`LIMIT=` stays exact through `pg_atomic_fetch_add_u64(&rows_reserved, CHUNK_ROWS)`: workers over-reserve
+freely and the last one truncates its chunk, so the count is exact while *which* rows is unspecified.
+
+A semantic bug found while writing the acceptance test: `PARALLEL_WORKERS=1` was being treated as "not
+specified" (0 is the sentinel) and silently replaced by the default `CPUs − 1`. Fixed by rejecting
+`nworkers == 1` before the default is applied, and pinned by an assertion that the log says
+`PARALLEL disabled (workers=1)`.
+
+### 20.6 Performance of the parallel export
+
+Measured on `public.lineitem` (7,375,042 rows, 1.13 GiB CSV) with the output on tmpfs, median of 5:
+
+| Config | Time | vs serial |
+|---|---|---|
+| `COPY ... TO` | 3.956 s | 1.03× |
+| `PARALLEL=OFF` | 4.077 s | 1.00× |
+| 2 workers | 1.950 s | 2.09× |
+| 4 workers | 0.999 s | 4.08× |
+| 8 workers | 0.611 s | 6.68× |
+| auto (15 workers) | **0.424 s** | **9.60×** |
+
+At 15 workers the pipeline moves 2.85 GB/s through a single `write(2)` loop: the writer, not the
+workers, becomes the ceiling — the export-side mirror of the loader's serial-insert floor. The full
+table, plus the reason on-disk numbers from this host are unusable (a bare `write`+`fsync`
+microbenchmark shows `fsync()` alternating between 0.1 s and exactly 30 s/60 s at an unchanged block
+size), is in [BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to).
+
+### 20.7 Verification
+
+`util/fl_export_parallel_test.sh` (shipped) runs 33 assertions on PG 18.6: serial baseline; a 4-worker
+CSV export whose row **set** equals the serial one, header exactly once, digest round-trip, `workers=4`
+in the log; `LIMIT` exactness and uniqueness across workers; the default count (`CPUs − 1`); parallel
+BINARY (size, sample `.ctl` provenance, reload digest); three serial fallbacks (`QUERY=`, tiny table,
+`PARALLEL_WORKERS=1`) each asserting the log line; three rejected inputs (existing output, existing
+`.ctl`, `PARALLEL_WORKERS=0`); and a live `mode='parallel'` progress record.
+
+All 33 pass on **15.19 / 16.15 / 17.11 / 18.6 / 19rc1** (165 assertions total). PG 19 needed one
+compile fix: `table_beginscan()` grew a `ScanOptions` argument, so the call is now behind
+`FL_TABLE_BEGINSCAN()`. Load-side suites are unaffected (CSV 90/90, fixed-length 44/44).
 
 ---
 

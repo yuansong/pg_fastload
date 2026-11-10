@@ -1,6 +1,6 @@
 # pg_fastload Verification Report
 
-> Version `1.0.0`  Author: yuanyuansong  Last updated: 2026-11-09
+> Version `1.0.0`  Author: yuanyuansong  Last updated: 2026-11-10
 >
 > This document records the verification status of the **current version**, with reproducible conclusions along four dimensions: functionality → build → memory → compliance.
 > Performance numbers: see [BENCHMARK.md](BENCHMARK.md); round-by-round optimization process: see [OPTIMIZATION.md](OPTIMIZATION.md).
@@ -336,10 +336,51 @@ did expose one real difference: `TimestampTzGetDatum()` is declared in `utils/ti
 an `implicit declaration`; an explicit include fixes it. Functional acceptance was run on 18.6 only,
 matching the verification scope of the rest of the project.
 
+### 12.1 Parallel export (2026-11-10)
+
+Shipped script: `util/fl_export_parallel_test.sh`. **33 assertions per major**, run on all five:
+**15.19 / 16.15 / 17.11 / 18.6 / 19rc1 → 165/165 PASS**, exit code 0 on each. Raw output:
+`export_par_15.out` … `export_par_19.out`, plus `_run_harness.out` for 18.6.
+
+| Group | Checks | Result |
+|---|---|---|
+| Serial baseline | `PARALLEL=OFF`: 200,000 rows reported, 200,001 lines, reload digest equals the source | PASS |
+| Parallel CSV (4 workers) | 200,000 rows, 200,001 lines, header exactly once (`id,pad`), reload digest equals the source, **row set** equals the serial output (`sort` + `cmp`), log says `workers=4` | PASS |
+| `LIMIT` across workers | `LIMIT=1000` → exactly 1000 rows / 1001 lines / 1000 distinct ids (no duplication across block ranges) | PASS |
+| Default worker count | no `PARALLEL_WORKERS` → 200,000 rows, digest matches, log says `workers=15` (online CPUs − 1) | PASS |
+| Parallel BINARY | 200,000 rows, file 7,200,000 B (200,000 × 36), sample `.ctl` present and carrying `# exported from public.pe_src`, reload digest equals the source | PASS |
+| Fallbacks | `QUERY=` → serial and logs `PARALLEL disabled`; 10-row table → serial and logs it; `PARALLEL_WORKERS=1` → serial and logs `workers=1` | PASS |
+| Rejected inputs | existing `OUTPUT` (writer reports `could not create output file`), existing `.ctl`, `PARALLEL_WORKERS=0` | PASS |
+| Live progress | while a 1M-row parallel export runs, another session reads `parallel\|export\|running`; the view is empty afterwards; 1,000,001 lines | PASS |
+
+A real defect was found by this harness and fixed: `PARALLEL_WORKERS=1` was reaching the "default" branch
+(0 is the sentinel) and silently running `CPUs − 1` workers instead of taking the serial path. The
+`workers=1 falls back to the serial path` assertion now pins it.
+
+Scaling (`public.lineitem`, 7,375,042 rows, 1.13 GiB CSV, output on tmpfs, median of 5):
+
+| Config | Time | vs serial |
+|---|---|---|
+| `COPY ... TO` (server side) | 3.956 s | 1.03× |
+| `PARALLEL=OFF` | 4.077 s | 1.00× |
+| 2 / 4 / 8 workers | 1.950 / 0.999 / 0.611 s | 2.09× / 4.08× / 6.68× |
+| auto (15 workers) | **0.424 s** | **9.60×** |
+
+Correctness at full size: the 4-worker output reloaded into a `LIKE` copy of the source gives the same
+order-independent digest (`7375042|9258128314029119699254`).
+
+Why tmpfs: on-disk runs on this host measured serial 4.06 s vs 31.0 s parallel, and a bare
+`write()`+`fsync()` microbenchmark (no PostgreSQL) reproduced `fsync()` alternating between ~0.1 s and
+exactly 30 s / 60 s at an unchanged 256 KiB block size. The hypervisor's storage stalls dominate any
+`fsync()`-inclusive timing here — the same artefact documented for the load path. Evidence:
+`export_par_bench_shm.out`, `export_par_disk_ab.out`, `_wtest.txt`.
+
+Load-side suites are unaffected by all of this: CSV 90/90 and fixed-length 44/44 re-run clean.
+
 ---
 
 ## 13. Conclusion
 
-The current version meets the delivery criteria across nine dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (8/8 view checks on five majors, exact final numbers, no measurable cost), export (CSV/BINARY/FIXED 39/39, CSV byte-identical to `COPY`), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
+The current version meets the delivery criteria across nine dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8, export 39/39, parallel export 33/33 on each of five majors), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (8/8 view checks on five majors, exact final numbers, no measurable cost), export (CSV/BINARY/FIXED with CSV byte-identical to `COPY` on the serial path; 9.60× parallel scaling), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
 
 The residual risks can all be attributed to environmental limitations or explicit design trade-offs, as documented in §8 and [OPTIMIZATION.md](OPTIMIZATION.md), along with corresponding usage recommendations (e.g., worker-count selection for cold-cache scenarios, using `PARALLEL=OFF` when fault tolerance is needed).

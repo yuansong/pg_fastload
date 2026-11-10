@@ -79,7 +79,8 @@ lib/writer_buffered.c    BUFFERED
 lib/writer_binary.c      定长文件写者（`WRITER=BINARY` 与导出共用）
 lib/writer_csv.c         定长之外的另一半：CSV 文件写者（仅导出使用）
 lib/writer_parallel.c    PARALLEL（上游「主读子写」多进程）
-lib/export.c             导出入口 pgfastload.pg_fastload_export()：SPI 游标扫描 → Writer
+lib/export.c             导出入口 pgfastload.pg_fastload_export()：选项解析、请求解析、
+                         串行 SPI 游标扫描 → Writer、并行分发
 lib/pg_btree.c           索引 spool 批量构建
 lib/progress.c           装载/导出进度：状态记录 + pg_fastload_progress SRF
 lib/pgut/*               上游工具库（PARALLEL writer 依赖 pgut-ipc.c）
@@ -90,7 +91,11 @@ lib/fastload_parallel.c  编排：DSM/队列创建、bgworker 注册、
                          FastloadParallelRun()（leader 消费循环）、
                          FastloadDefaultWorkers()（默认 worker 数的唯一定义）
 lib/fastload_worker.c    reader 单遍扫描/路由 + worker 消费/解析/回传
+lib/export_parallel.c    导出编排：DSM + 每 worker 一条 shm_mq、writer bgworker
+                         （只做 write + fsync）、查询 bgworker（块区间扫描 + 格式化）、
+                         FlExportParallelSupported() / FlExportParallelTry()
 include/fastload_parallel.h  DSM 布局、参数/头结构、key 常量、队列容量
+include/export_parallel.h    导出 DSM 布局：FlExportShared / FlExportParams / FlExportChunk
 include/pg_profile.h     USE_PROFILE=1 阶段计时埋点
 ```
 
@@ -109,7 +114,7 @@ include/pg_profile.h     USE_PROFILE=1 阶段计时埋点
 与原版 `pg_bulkload` 完全一致；本项目对该路径只做过两处与语义无关的改动：
 worker 默认值改为调用统一的 `FastloadDefaultWorkers()`，以及 `SpoolerInsert()` 的无索引早退。
 
-### 4.1 反方向：导出数据流
+### 4.1 反方向：串行导出数据流（`PARALLEL=OFF`）
 
 导出不经过 `Reader`/`Parser`（那是"字节 → 元组"），而是从**已经成型**的元组出发：
 
@@ -129,8 +134,71 @@ TABLE=/QUERY= 参数
 | 元组必须先过 `wt->tchecker->checker` 才能进 `BinaryWriter` | 装载时元组的类型来自目标表 `TupleDesc`；游标元组可能没有类型 OID，因此 `BinaryWriterSetSourceDesc()` 显式把结果行的 `TupleDesc` 交给 checker，同时完成宽度/范围校验 |
 | CSV 用独立 writer，定长复用 `BinaryWriter` | 装载侧本来就没有"写 CSV"的实现（只有 `parser_csv.c`）；而定长布局的描述符 `COL` 早已存在，导出的 `OUT_COL` 就是它的镜像 |
 
-导出**不接并行**：源是游标（单条 SQL、单快照），目标是单个文件，没有"重复读文件"的放大可摊，
-把 ①②③ 那套 reader/worker 搬过来只会增加 IPC。吞吐与 `COPY TO` 同量级（见 [BENCHMARK](BENCHMARK.md)）。
+`QUERY=` 永远走这条路径；`TABLE=` 只在无法拆分时（§4.2 的回退清单）走这条路径。
+
+### 4.2 并行镜像（`PARALLEL=ON`，`TABLE=` 的默认行为）
+
+装载管线是*单 reader → N parser → 1 次串行插入*；导出的管线是它严格的反向：
+**N 个查询进程 → 1 个写文件进程**，写进程是唯一的串行段，且它只做 `write(2)`。
+
+```
+leader（只做编排：DSM、启动 worker、进度、样例 .ctl）
+   │
+   ├─ 先起 writer bgworker，再起 N 个查询 bgworker
+   │
+查询进程 0 ──shm_mq 0──┐
+查询进程 1 ──shm_mq 1──┤
+    ...                ├──→ writer 进程 ──→ OUTPUT 文件
+查询进程 N-1 ──shm_mq N┘        （fsync 后回报行数/字节数）
+```
+
+所有花 CPU 的事都在 worker 里：堆扫描、元组解构、`OutputFunctionCall`，以及 CSV 的加引号状态机。
+这四项就是串行导出的全部成本（见 [BENCHMARK §8](BENCHMARK.zh-CN.md)），所以把它们搬到进程边界
+另一侧是净收益 —— 即便每个格式化后的字节都要过一次共享内存。
+
+| 关注点 | 并行导出 | 并行装载（§5） |
+|---|---|---|
+| 扇出/扇入 | N 个 worker → 1 个 writer | 1 个 reader → N 个 worker |
+| 串行段 | writer 进程（`write` + `fsync`） | leader（`WriterInsert`） |
+| 跨边界数据 | 已格式化的字节 | 原始记录（字节）或定长行 |
+| 分片键 | ctid **块区间**（`heap_setscanlimits`） | 输入文件中的字节偏移 |
+| 行序 | **不保证**（按到达顺序） | 保证 |
+| `QUERY=` | 回退串行 | 不适用 |
+| 进度来源 | writer 的字节/行计数 | 各 worker 的计数 |
+
+#### 切分扫描
+
+每个 worker 从 `bgw_extra` 拿到 `FlExportWorkerId {worker_id, start, nblocks}`，然后：
+
+```c
+scan = FL_TABLE_BEGINSCAN(rel, snap);
+heap_setscanlimits(scan, wid.start, wid.nblocks);
+```
+
+`heap_setscanlimits()` 的块是物理块，不是逻辑块：一段区间会产出 ctid 落在其中的**所有可见元组**，
+顺序取决于可见性映射与上一个使用的缓冲区。因此分片互不相交且完备，运行期不需要任何协调 ——
+没有共享工作队列、没有任务窃取、没有锁。块按整除均分（`nblocks / nworkers`，余数给前面的 worker）。
+
+除此之外什么都不共享：每个 worker 自己打开关系、自己恢复 leader 序列化的快照
+（`RestoreSnapshot`）、自己按选项 blob 重建 writer。
+
+#### 为什么用块区间而不是 `ctid BETWEEN`
+
+`ctid` 谓词会被下推成过滤条件，于是每个 worker 仍要扫过每一页、再把大部分丢掉 —— N 倍读放大
+而不是 1 倍。`heap_setscanlimits()` 把区间塞进扫描描述符本身：每个 worker 从自己的块开始、
+到自己的块结束。
+
+#### 行序不保证
+
+查询进程把它那段的产出直接追加，写进程按**到达顺序**落盘。因此文件是一份合法、完整的转储，
+行序取决于调度。这是写入文档的契约（[USER_MANUAL §18.1](USER_MANUAL.zh-CN.md)），也是数据通路
+可以无锁的原因，更是验收脚本按**行集**而不是逐字节比较输出的原因
+（`util/fl_export_parallel_test.sh`）。任何对顺序敏感的需求都属于 `QUERY=`（串行路径），
+或者回灌后的 `ORDER BY`。
+
+`LIMIT=` 依然精确：各 worker 用 `pg_atomic_fetch_add_u64(&rows_reserved, CHUNK_ROWS)` 抢占预算、
+可以随意超订，最后一个把本块裁到剩余额度。于是 `LIMIT=n` 恰好返回 `n` 行 —— 只是顺序不保证，
+所以是"某个 n 行子集"。
 
 ---
 
@@ -278,6 +346,17 @@ reader 只判断"一条记录到哪结束"，不切字段。状态机带 `in_quo
 `FASTLOAD_KEY_INPUT_BASE = 2 + FASTLOAD_MAX_WORKERS(64) = 66`，用固定高基址保证两组 key 永不冲突
 （即使 worker 数变化）。`FASTLOAD_MAX_WORKERS = 64` 同时界定 `FastloadShared` 的数组大小。
 
+导出方向使用**自己**的 DSM 段（`FL_EXPORT_SHM_MAGIC`），因此导出与装载永远不会误挂到对方的内存上：
+
+| key | 对象 | 大小 | 内容 |
+|---|---|---|---|
+| 0 | `FlExportShared` | ~17 KiB | `slock_t mutex`、`nworkers`、`writer_state`、`writer_error[256]`、`worker_state[]`、`worker_rows[]`、`worker_error[][]`、`rows_written`、`bytes_written`、`abort_requested`、`pg_atomic_uint64 rows_reserved` |
+| 1 | `FlExportParams` | 变长 | `nworkers`、`type`、`natts`、`limit`、`header`、`relid`、`nblocks`，以及 `data[]` 里三段 blob：表头文本、`SerializeSnapshot` 输出、writer 选项表（`KEY\0value\0`） |
+| 2 .. 2+N-1 | `shm_mq` × N | 2 MiB/个 | worker → writer，一条 `FlExportChunk` 头 + `nbytes` 字节已格式化输出 |
+
+`FlExportChunk { int32 nrows; int32 nbytes; }` 在每条消息最前面。写进程不解析行 —— 它只追加
+`nbytes` 字节、累加 `nrows` —— 所以一块数据就是纯粹的一段字节，写进程里没有任何格式相关代码。
+
 ### 7.2 EOF 与失败判定
 
 正常收尾与崩溃必须可区分，否则 worker 会把"leader/reader 死了"当成"文件读完了"：
@@ -295,6 +374,22 @@ leader 收到 SHM_MQ_DETACHED（worker 侧）:
 
 PG 官方语义保证：sender detach 后 receiver 仍可读走队列中剩余消息，因此"小文件 worker 先跑完"
 不是错误路径。
+
+导出方向的失败判定同理，只是方向相反：
+
+```
+writer 正常：  writer_state = FL_WORKER_DONE，发布 rows_written / bytes_written
+writer 异常：  writer_state = FL_WORKER_FAILED + writer_error[]（ENOSPC、EACCES 等）→ close(fd) → 退出
+worker 异常：  worker_state[i] = FL_WORKER_FAILED + worker_error[i] → detach → 退出
+worker 收到 SHM_MQ_DETACHED: fl_export_send_chunk() 返回 false → 提前收工，自己不报错
+leader 轮询：
+    writer_state == FAILED → 置 abort_requested、读 writer_error[]、ereport(ERROR)
+    writer_state == DONE   → 要求所有 worker 都 DONE，然后返回行数/字节数
+```
+
+`abort_requested` 是"写进程失败如何停下 worker"的答案：worker 每块重读一次，所以输出文件坏掉时
+每个 worker 最多浪费一块的工作量，而不是跑完整张表。反过来，单个 worker 失败不需要停掉同伴 ——
+写进程只是少了些行，leader 报 worker 的错误而不是行数。
 
 ---
 

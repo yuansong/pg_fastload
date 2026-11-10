@@ -1,6 +1,6 @@
 # pg_fastload 验证报告
 
-> 版本 `1.0.0`　作者：yuanyuansong　最后更新：2026-11-09
+> 版本 `1.0.0`　作者：yuanyuansong　最后更新：2026-11-10
 >
 > 本文记录**当前版本**的验证状态，按「功能 → 构建 → 内存 → 合规」四个维度给出可复现的结论。
 > 性能数字见 [BENCHMARK.md](BENCHMARK.md)；逐轮优化过程见 [OPTIMIZATION.md](OPTIMIZATION.md)。
@@ -318,9 +318,8 @@ bgworker 真启动（日志有 `PARALLEL=ON, TYPE=CSV, workers=N` 且无 `PARALL
 | 同一份 CSV 装回来，`PARALLEL=OFF` | 1.06 s |
 | 同一份 CSV 装回来，`PARALLEL_WORKERS=4` | 0.48 s |
 
-输出 `cmp` 相同（带表头 326,888,903 B）。导出不参与并行，这是设计选择而非未完成项（见
-[ARCHITECTURE §4.1](ARCHITECTURE.zh-CN.md#41-反方向导出数据流)）。分解也说明了原因：0.90 s 里
-CPU 全部压在单个后端上，16 核中 15 核空转，真正落盘只占 0.04 s。证据：`export_perf.out`、
+输出 `cmp` 相同（带表头 326,888,903 B）。串行路径的分解见上表；自 2026-11-10 起 `PARALLEL=ON` 已是
+`TABLE=` 导出的默认行为，串行只用于 `QUERY=`／显式关闭／小表（见 §12.1）。证据：`export_perf.out`、
 `export_perf2.out`、`export_perf_bin.out`；数字与解读见
 [BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
 
@@ -332,16 +331,56 @@ CPU 全部压在单个后端上，16 核中 15 核空转，真正落盘只占 0.
 间接带入，19 不再带入，导致 `export.c` 报 `implicit declaration`；补上显式 include 后通过。
 功能验收只在 18.6 上执行（与整个项目的验证范围一致）。
 
+### 12.1 并行导出（2026-11-10）
+
+随扩展交付的脚本：`util/fl_export_parallel_test.sh`。**每个大版本 33 项断言**，五个大版本全跑：
+**15.19 / 16.15 / 17.11 / 18.6 / 19rc1 → 165/165 PASS**，各自退出码 0。原始输出：
+`export_par_15.out` … `export_par_19.out`，18.6 另见 `_run_harness.out`。
+
+| 分组 | 检查项 | 结果 |
+|---|---|---|
+| 串行基线 | `PARALLEL=OFF`：200,000 行、200,001 行文本、回灌摘要与源表一致 | PASS |
+| 并行 CSV（4 worker） | 200,000 行、200,001 行、表头只出现一次（`id,pad`）、回灌摘要与源表一致、**行集**与串行输出一致（`sort` + `cmp`）、日志 `workers=4` | PASS |
+| `LIMIT` 跨 worker | `LIMIT=1000` → 恰好 1000 行 / 1001 行文本 / 1000 个不同 id（块区间之间无重复） | PASS |
+| 默认 worker 数 | 不给 `PARALLEL_WORKERS` → 200,000 行、摘要一致、日志 `workers=15`（在线 CPU − 1） | PASS |
+| 并行 BINARY | 200,000 行、文件 7,200,000 B（200,000 × 36）、样例 `.ctl` 存在且含 `# exported from public.pe_src`、回灌摘要与源表一致 | PASS |
+| 回退 | `QUERY=` → 串行且日志有 `PARALLEL disabled`；10 行小表 → 串行且日志有；`PARALLEL_WORKERS=1` → 串行且日志 `workers=1` | PASS |
+| 被拒输入 | `OUTPUT` 已存在（写进程报 `could not create output file`）、`.ctl` 已存在、`PARALLEL_WORKERS=0` | PASS |
+| 运行中进度 | 100 万行并行导出期间另一会话读到 `parallel\|export\|running`；结束后视图 0 行；产物 1,000,001 行 | PASS |
+
+这套脚本抓到一个真实缺陷并已修复：`PARALLEL_WORKERS=1` 会走进「默认值」分支（哨兵是 0），
+于是静默按 `CPU−1` 并行，而不是走串行路径。现在由 `workers=1 falls back to the serial path`
+这条断言钉住。
+
+扩展性（`public.lineitem`，7,375,042 行、1.13 GiB CSV，输出在 tmpfs，5 轮取中位）：
+
+| 配置 | 耗时 | 相对串行 |
+|---|---|---|
+| `COPY ... TO`（服务端） | 3.956 s | 1.03× |
+| `PARALLEL=OFF` | 4.077 s | 1.00× |
+| 2 / 4 / 8 个 worker | 1.950 / 0.999 / 0.611 s | 2.09× / 4.08× / 6.68× |
+| auto（15 个 worker） | **0.424 s** | **9.60×** |
+
+全量正确性：4 worker 的输出重新装载进 `LIKE` 副本，与行序无关的摘要一致
+（`7375042|9258128314029119699254`）。
+
+为什么用 tmpfs：本机磁盘上实测串行 4.06 s、并行 31.0 s；而裸 `write()`+`fsync()` 微基准（不经过
+PostgreSQL）复现出「256 KiB 块大小不变，`fsync()` 在约 0.1 s 与恰好 30 s / 60 s 之间跳变」。
+也就是说这台机器上任何含 `fsync()` 的计时都在度量 hypervisor 的存储抖动 —— 与装载路径记录的是同一个
+现象。证据：`export_par_bench_shm.out`、`export_par_disk_ab.out`、`_wtest.txt`。
+
+装载侧完全不受影响：CSV 90/90、定长 44/44 重跑均通过。
+
 ---
 
 ## 13. 结论
 
-当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8）、上游等价性（与
-pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、加载进度（五个大版本各 8/8 视图检查、收尾数字
-精确、开销不可测）、导出（CSV/BINARY/FIXED 39/39，CSV 与 `COPY` 逐字节相同）、构建（release +
-debug 双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、定长 1.82×）、内存生命周期（全 palloc、
-无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）与版权合规（保留原版权 + 明确署名与非
-背书）九个维度达到交付标准。
+当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8、导出 39/39、并行导出五个
+大版本各 33/33）、上游等价性（与 pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、加载进度
+（五个大版本各 8/8 视图检查、收尾数字精确、开销不可测）、导出（CSV/BINARY/FIXED，串行路径与 `COPY`
+逐字节相同，并行 9.60× 扩展）、构建（release + debug 双 rc=0 且新增代码零警告）、性能（CSV 相对
+串行 4.5×、定长 1.82×）、内存生命周期（全 palloc、无 malloc 族符号）、多版本适配（PG 15/16/17/19
+全部 PASS）与版权合规（保留原版权 + 明确署名与非背书）九个维度达到交付标准。
 
 残留风险均可归因于环境限制或明确的设计取舍，已在 §8 与 [OPTIMIZATION.md](OPTIMIZATION.md)
 中写明，并给出相应的使用建议（例如冷缓存场景的 worker 数选择、需要容错时使用 `PARALLEL=OFF`）。
