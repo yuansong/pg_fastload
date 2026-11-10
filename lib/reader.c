@@ -78,8 +78,12 @@ ReaderCreate(char *type)
 	self->limit = INT64_MAX;
 	self->checker.encoding = -1;
 
+	/* Progress records are published unless the user turns them off. */
+	self->progress = true;
+
 	idx = choice("TYPE", type, keys, lengthof(keys));
 	self->parser = values[idx]();
+	self->type = pstrdup(keys[idx]);
 
 	/* TYPE=CSV and TYPE=BINARY/FIXED (fixed-length) are parallelized */
 	self->is_csv = (idx == 2);
@@ -230,6 +234,10 @@ ReaderParam(Reader *rd, const char *keyword, char *target)
 	{
 		rd->progress = ParseBoolean(target);
 	}
+	else if (CompareKeyword(keyword, "PROGRESS_NOTICE"))
+	{
+		rd->progress_notice = ParseBoolean(target);
+	}
 	else if (CompareKeyword(keyword, "PROGRESS_INTERVAL"))
 	{
 		int64	n = ParseInt64(target, 0);
@@ -244,8 +252,8 @@ ReaderParam(Reader *rd, const char *keyword, char *target)
 		rd->progress_interval = (int) n;
 
 		/*
-		 * Giving a cadence is a request to see the report; requiring a
-		 * second keyword for the obvious meaning would only surprise people.
+		 * A cadence without PROGRESS is a request to see progress; turning
+		 * the feature on is the only meaning that makes sense.
 		 */
 		rd->progress = true;
 	}
@@ -439,9 +447,13 @@ ReaderDumpParams(Reader *self)
 		self->checker.check_constraints ? "YES" : "NO");
 	appendStringInfo(&buf, "PROGRESS = %s\n", self->progress ? "YES" : "NO");
 	if (self->progress)
+	{
+		appendStringInfo(&buf, "PROGRESS_NOTICE = %s\n",
+						 self->progress_notice ? "YES" : "NO");
 		appendStringInfo(&buf, "PROGRESS_INTERVAL = %d\n",
 			self->progress_interval > 0 ? self->progress_interval
 										: FL_PROGRESS_DEFAULT_INTERVAL_MS);
+	}
 
 	LoggerLog(INFO, buf.data, 0);
 	pfree(buf.data);

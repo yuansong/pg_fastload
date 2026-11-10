@@ -59,6 +59,8 @@ Chinese version of the diagram: [`img/architecture.zh-CN.svg`](img/architecture.
 | **shared protocol** | DSM anonymous segment | states/errors/row counts (key 0), parameters and column definitions (key 1), bidirectional `shm_mq` (keys 2.. / 66..) | `include/fastload_parallel.h` |
 | **serial pipeline** | inside the leader | the upstream `reader`/`parser`/`checker`/`writer`/`source` modules, used when `PARALLEL=OFF` or downgraded; bit-for-bit upstream behaviour | `lib/reader.c`, `lib/parser_*.c`, `lib/writer_*.c` |
 | **profiling hooks** | compile-time switch | with `USE_PROFILE=1`, six timing groups: GLOBAL / READER / WRITER / MERGE / PARALLEL / WORKER | `include/pg_profile.h`, `lib/pg_fastload.c` |
+| **progress publisher** | inside the leader | publishes one status record per running load (`$PGDATA/pg_fastload/progress/<pid>.status`, atomic `.tmp` + `rename`), purges records of dead backends; optionally streams `NOTICE`/`LOGFILE` lines (`PROGRESS_NOTICE=ON`) | `lib/progress.c` |
+| **progress view** | any session | `pgfastload.pg_fastload_progress`: an SRF that lists the status directory and computes `percent` / rates / `eta_seconds` on read | `lib/progress.c` `pg_fastload_progress()`, `lib/pg_fastload.sql.in` |
 
 ### 3.1 Module map
 
@@ -78,6 +80,7 @@ lib/writer_buffered.c    BUFFERED
 lib/writer_binary.c      binary export (TUPLE / recovery path)
 lib/writer_parallel.c    PARALLEL (upstream "read here, write there" multi-process)
 lib/pg_btree.c           batched index spool build
+lib/progress.c           load progress: status records + the pg_fastload_progress SRF
 lib/pgut/*               upstream utility library (the PARALLEL writer depends on pgut-ipc.c)
 
 parallel subsystem (c) 2026 yuanyuansong

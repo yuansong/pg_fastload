@@ -202,8 +202,11 @@ struct Reader
 	bool			parallel_has_fnn;
 
 	/* Load progress reporting (lib/progress.c) */
-	bool			progress;			/**< PROGRESS = ON */
+	bool			progress;			/**< PROGRESS, default ON: publish a
+										 status record readable by any session */
+	bool			progress_notice;	/**< PROGRESS_NOTICE: also print NOTICE */
 	int				progress_interval;	/**< PROGRESS_INTERVAL, ms; 0 => default */
+	char		   *type;				/**< resolved TYPE, for the record */
 };
 
 extern Reader *ReaderCreate(char *type);

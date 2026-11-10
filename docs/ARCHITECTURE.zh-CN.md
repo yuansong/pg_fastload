@@ -58,6 +58,8 @@ while (wt->count < rd->limit)
 | **共享协议** | DSM 匿名共享段 | 状态/错误/行数（key 0）、参数与列定义（key 1）、双向 `shm_mq`（key 2.. / key 66..） | `include/fastload_parallel.h` |
 | **串行管道** | leader 进程内 | 原版 `reader`/`parser`/`checker`/`writer`/`source`：`PARALLEL=OFF` 或降级时使用，行为与 pg_bulkload 逐位一致 | `lib/reader.c`、`lib/parser_*.c`、`lib/writer_*.c` |
 | **profile 埋点** | 编译期开关 | `USE_PROFILE=1` 时输出 GLOBAL / READER / WRITER / MERGE / PARALLEL / WORKER 六组计时 | `include/pg_profile.h`、`lib/pg_fastload.c` |
+| **进度发布** | leader 内部 | 每个运行中的装载发布一条状态记录（`$PGDATA/pg_fastload/progress/<pid>.status`，原子 `.tmp` + `rename`），清理已死后端的记录；可选输出 `NOTICE`／`LOGFILE` 行（`PROGRESS_NOTICE=ON`） | `lib/progress.c` |
+| **进度视图** | 任意会话 | `pgfastload.pg_fastload_progress`：枚举状态目录、在读取时计算 `percent`／速率／`eta_seconds` 的 SRF | `lib/progress.c` `pg_fastload_progress()`、`lib/pg_fastload.sql.in` |
 
 ### 3.1 模块划分
 
@@ -77,6 +79,7 @@ lib/writer_buffered.c    BUFFERED
 lib/writer_binary.c      二进制导出（TUPLE/recovery 路径）
 lib/writer_parallel.c    PARALLEL（上游「主读子写」多进程）
 lib/pg_btree.c           索引 spool 批量构建
+lib/progress.c           装载进度：状态记录 + pg_fastload_progress SRF
 lib/pgut/*               上游工具库（PARALLEL writer 依赖 pgut-ipc.c）
 
 并行子系统（(c) 2026 yuanyuansong）

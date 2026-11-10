@@ -71,7 +71,7 @@
 | 阶段级耗时剖析（profile） | 部分阶段 | ✓ GLOBAL / PARALLEL / WORKER 全阶段，含 worker 侧 SCAN/FORM/IPC |
 | 无索引表的 spool 空转消除 | ✗ | ✓（`SpoolerInsert()` 早退，省 ~0.28 s/1 GiB） |
 | 逐行容错 + badfile | ✓ | ✓（串行路径；并行路径按失败处理，见限制） |
-| 装载进度显示 | ✗ | ✓（`PROGRESS=ON`：百分比、行数、MiB/s、ETA，见 [§4.5](#45-观察长装载的进度)） |
+| 装载进度显示 | ✗ | ✓（每个装载默认发布，任何会话读 `pgfastload.pg_fastload_progress` 视图即可，见 [§4.5](#45-观察长装载的进度)） |
 | 全部原有控制文件关键字 | ✓ | ✓（语义不变，含 `WRITER=PARALLEL`） |
 
 ### 2.3 使用方式
@@ -265,25 +265,31 @@ SELECT count, duration FROM pgfastload.pg_fastload(ARRAY[...]);
 
 ### 4.5 观察长装载的进度
 
-加两个关键字，语句就会边跑边汇报：
+不用加任何关键字：每个装载都会发布自己的进度，你在**另一个**会话里读它 —— 装载会话本身是忙的，
+它的客户端正阻塞在这条语句上：
 
 ```sql
+-- 会话 1
 SELECT * FROM pgfastload.pg_fastload(ARRAY[
   'INPUT=/tmp/tpcc/order_line.csv',
   'OUTPUT=public.order_line',
-  'PARALLEL=ON',
-  'PROGRESS=ON',
-  'PROGRESS_INTERVAL=1000'        -- 两行之间的毫秒数，默认 1000
+  'PARALLEL=ON'
 ]);
+
+-- 会话 2
+SELECT * FROM pgfastload.pg_fastload_progress;
 ```
 
 ```
-NOTICE:  pg_fastload progress: 32.7% | rows 2,410,881 | 334.8 MiB / 1.00 GiB | 129.6 MiB/s | 933.0k rows/s | elapsed 00:00:02 | ETA 00:00:05
-NOTICE:  pg_fastload progress: 100.0% | rows 7,375,042 | 1.00 GiB / 1.00 GiB | 137.1 MiB/s | 987.4k rows/s | elapsed 00:00:07 | done
+ pid  | datname |     relname       | input_type |   mode   |  state  | elapsed_seconds |  rows   | bytes_read | total_bytes
+------+---------+-------------------+------------+----------+---------+-----------------+---------+------------+-------------
+ 4121 | tpcc    | public.order_line | CSV        | parallel | running |            2.41 | 2410881 |  334864384 |  1073741824
 ```
 
-进度以 `NOTICE` 形式输出（边跑边到客户端），同时写入 `LOGFILE`；开销是每行一次整数比较。
-百分比在何种情况下退化为按 `LIMIT` 行数计算、输入大小未知时怎么显示，见
+视图是集群级的（记录放在 `$PGDATA/pg_fastload/progress/` 下），所以 `tpcc` 里发起的装载在同实例
+任何数据库都看得到；百分比、字节／行速率与 `eta_seconds` 都由视图算好。装载结束、中止或被 cancel
+后记录即消失。若还想看 `NOTICE` 行（以及 `LOGFILE` 里的副本），加 `PROGRESS_NOTICE=ON`；
+`PROGRESS=OFF` 则完全不发布。列含义、开销与权限见
 [USER_MANUAL §12.4](docs/USER_MANUAL.zh-CN.md#124-加载进度)。
 
 完整关键字与返回列见 [docs/USER_MANUAL.md](docs/USER_MANUAL.md)。

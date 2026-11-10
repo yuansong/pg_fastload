@@ -250,37 +250,41 @@ bgworker 真启动（日志有 `PARALLEL=ON, TYPE=CSV, workers=N` 且无 `PARALL
 
 ---
 
-## 11. 进度显示验证（2026-11-10）
+## 11. 进度视图验证（2026-11-10）
 
-`PROGRESS=ON` 必须数字正确、节奏正确、边界正确，且无可测开销。脚本 `_t_progress.py`，PG 18.6，
-15 个用例，输入为 1 GiB TPC-H `lineitem.csv`（7,375,042 行）与生成的 100 MiB 定长文件
-（1,638,400 行）。
+加载进度必须满足一个 `NOTICE` 无法满足的性质：**装载会话正忙时也能读到**。所以下列检查全部是
+一个连接发起装载、另一个连接读 `pgfastload.pg_fastload_progress`。
+
+随扩展交付的脚本：`util/fl_progress_test.py`（每个版本 8 项检查，3M 行生成的 CSV），在
+**15.19 / 16.15 / 17.11 / 18.6 / 19rc1** 上各跑一遍。原始跨会话证据：PG 18.6 上的 `_t_view.py`，
+输入为 1 GiB TPC-H `lineitem.csv`（7,375,042 行）；另有 `_t_stale.py`，对运行中的装载执行 `SIGKILL`。
 
 | 检查项 | 结果 |
 |---|---|
-| 不写 `PROGRESS` / `PROGRESS=OFF` | 0 行进度（对既有用户零影响） |
-| 只写 `PROGRESS_INTERVAL` | 自动开启（串行 1 GiB、200 ms → 36 行） |
-| 串行 1 GiB，间隔 200 ms | 36 行 / 6.9 s；收尾 `100.0%`，行数 `7,375,042` = SRF `count` |
-| `PARALLEL=ON` w=4，间隔 200 ms | 10 行 / 1.7 s；收尾行数一致 |
-| `PARALLEL=ON` auto（15），默认 1000 ms | 3 行（启动 / 一次更新 / 收尾） |
-| `LIMIT=1000000` | 百分比切换为按行（`100.0% of 1,000,000 rows`），reader 停在 1 GiB 中的 139 MiB |
-| 定长 100 MiB，间隔 100 ms | 3 行；收尾行数 `1,638,400` = SRF `count` |
+| 默认（不写关键字） | 第二个会话看得到运行中的装载：`datname`、`relname = public.flprog`、`input_type = CSV`、`mode = serial`、`state = running`、`interval_ms = 1000`、`total_bytes` = 文件大小；结束后 0 行 |
+| `PROGRESS=OFF` | 全程视图为空，`$PGDATA/pg_fastload/progress/` 下不写任何文件 |
+| 只写 `PROGRESS_INTERVAL=100` | 发布开启；行数在攀升（3M 行文件上观测到 2.3M~2.8M），百分比与字节比一致（误差 <1 个百分点） |
+| `PARALLEL=ON` w=2 | `mode = parallel`；行数与串行一致 |
+| `LIMIT=1000000` | `total_rows = 1000000`，`percent = rows / total_rows`，`rows` 不超过 `total_rows`；装载正好停在 100 万行 |
+| `PROGRESS_NOTICE=ON` | 在视图之外恢复 NOTICE 流（100 ms 间隔 4 行）；收尾行 `100.0% | done` 带精确行数，等于函数返回值；**默认关闭**（其余用例 0 条 NOTICE） |
 | `PROGRESS_INTERVAL=50` | 报错 `PROGRESS_INTERVAL must be between 100 and 3600000 milliseconds` |
-| 百分比单调性与上界 | 严格不减，永不超过 100.0 |
-| 开销（串行 1 GiB，三次交错运行中位数） | 不开 6 922 ms vs 开 6 917 ms（**−0.07%**，噪声范围） |
+| 单调性与上界 | `rows` 与 `percent` 单调不减，`percent` 落在 `0..100` |
+| 跨会话，1 GiB 串行 | 第 0 次轮询 1,117,697 行（15.2%），第 5 次 6.5M；全程 `state = running`；结束后 `rows in view = 0` |
+| 清理 | 成功后记录被删除；被 kill 的后端记录以 `state = 'stale'` 报告一次后删除 |
+| 开销（串行 3M 行，三次交错运行中位数） | 不开 0.434~0.442 s vs 开 0.434~0.442 s（**−0.2%~+1.9%**，噪声范围），15/16/17/19 同样在噪声内 |
 
-没有任何用例出现行数不符、缺收尾行，或未开启时多出输出。CSV 90/90、定长 44/44 不受影响
-（该选项默认关闭）。
+没有任何用例出现行数不符、残留陈旧记录，或 `PROGRESS=OFF` 时视图出现行。CSV 90/90、定长 44/44
+不受影响（记录在行路径之外发布，且发布失败不会让装载失败）。
 
 ---
 
 ## 12. 结论
 
 当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8）、上游等价性（与
-pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、进度显示（15/15 用例、收尾数字精确、开销不可测）、
-构建（release + debug 双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、定长 1.82×）、
-内存生命周期（全 palloc、无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）与版权合规
-（保留原版权 + 明确署名与非背书）八个维度达到交付标准。
+pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、加载进度（五个大版本各 8/8 视图检查、收尾数字
+精确、开销不可测）、构建（release + debug 双 rc=0 且新增代码零警告）、性能（CSV 相对串行 4.5×、
+定长 1.82×）、内存生命周期（全 palloc、无 malloc 族符号）、多版本适配（PG 15/16/17/19 全部 PASS）
+与版权合规（保留原版权 + 明确署名与非背书）八个维度达到交付标准。
 
 残留风险均可归因于环境限制或明确的设计取舍，已在 §8 与 [OPTIMIZATION.md](OPTIMIZATION.md)
 中写明，并给出相应的使用建议（例如冷缓存场景的 worker 数选择、需要容错时使用 `PARALLEL=OFF`）。

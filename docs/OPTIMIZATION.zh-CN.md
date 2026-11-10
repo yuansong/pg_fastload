@@ -165,6 +165,16 @@ PostgreSQL 18.6 release，`WRITER=DIRECT`，无索引，热缓存 3 轮中位。
 | 代价 | I/O ×N + N 份重复边界扫描：热缓存下 32M 行 2.82×，**冷缓存反转至 0.15×（慢 6.49×）** |
 | 结论 | 放弃，改为单读多解。首版的记录边界状态机、`SKIP/LIMIT` 窗口语义、降级清单与竞态容忍设计被单读多解架构全部继承 |
 
+### 8.6 用装载会话自己的 `NOTICE` 流报进度
+
+| 项 | 内容 |
+|---|---|
+| 设想 | 用 `NOTICE` 消息报进度（`PROGRESS=ON`），同时写一份到 `LOGFILE` |
+| 实现代价 | 很低：格式化函数 + 插入循环里一次间隔判断 |
+| 为何不够 | 报到了**错的地方**：忙的正是装载会话，它的客户端被阻塞在语句里，真正需要这个数字的人看不到；实际需求是跨会话可见（另一个 psql 窗口、监控采集、类似 `pg_stat_activity` 的轮询），而 `NOTICE` 还会被 `client_min_messages = warning` 及以上静默掉 |
+| 结论 | 不采纳为主机制，**但保留为选项**：进度发布到 `$PGDATA/pg_fastload/progress/<pid>.status`，由 `pgfastload.pg_fastload_progress` 读取；`PROGRESS_NOTICE=ON` 仍会输出 `NOTICE` 形式，供希望直接看客户端或 `LOGFILE` 的用户使用 |
+| 已排除的替代方案 | `dsm_registry`（`GetNamedDSMSegment`）——PG 17 才引入，而本代码树支持 15+；SysV 共享内存——会让每个部署都被迫打开 `shared_preload_libraries`；后台 worker 采样 `pg_stat_activity`——看不到每装载的字节计数 |
+
 ---
 
 *关联文档：[修改点](CHANGES.md) · [验证报告](VERIFICATION.md) · [性能基准](BENCHMARK.md) ·
