@@ -23,12 +23,12 @@ reference set in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 | # | Advantage | Measured / guarantee |
 |---|---|---|
-| 1 | **Parallel loading that stays one transaction.** Stages ①②③ move to N background workers, stage ④ stays serial in the caller: no second connection, no early visibility of uncommitted rows, identical atomicity to a serial load. | 5.81 s → **1.37 s (4.24×)** with 15 workers |
+| 1 | **Parallel loading that stays one transaction.** Stages ①②③ move to N background workers, stage ④ stays serial in the caller: no second connection, no early visibility of uncommitted rows, identical atomicity to a serial load. | 5.81 s → **1.37 s (4.24×)** with 15 workers; **6.07× `COPY ... FROM`** |
 | 2 | **The input file is read exactly once.** A single reader scans sequentially and distributes chunks; workers never touch the file. Total reads stay at 1× the file size, so the speedup does not invert once the data outgrows the page cache. | 1× read at every worker count |
-| 3 | **The cheapest serial path available.** Quote-free records skip the byte-at-a-time state machine for a `memchr` bulk split, so even `PARALLEL=OFF` beats the two obvious references. | **1.20× upstream `pg_bulkload`**, **1.46× `COPY ... FROM`** |
+| 3 | **The cheapest serial path available.** Quote-free records skip the byte-at-a-time state machine for a `memchr` bulk split, so even `PARALLEL=OFF` beats the two obvious references. | **1.22× upstream `pg_bulkload`**, **1.43× `COPY ... FROM`** |
 | 4 | **It never breaks your semantics silently.** The 13 conditions the parallel path cannot honour fall back to the serial path with one `INFO` line, and a bad row fails the whole load instead of keeping a timing-dependent subset. | [§5](#5-automatic-downgrade), [§6](#6-constraints-you-should-know) |
 | 5 | **Drop-in from pg_bulkload.** Same control-file keywords, same `TYPE` values, same log format, same `WRITER` modes — rename the two identifiers and your `.ctl` files keep working. | [§2.3](#23-usage) |
-| 6 | **Both directions, one engine.** `pgfastload.pg_fastload_export()` writes a table (or any `SELECT`) to CSV / BINARY / FIXED through the same Writer and the same `COL`/`OUT_COL` layout, so a fixed-width file loads back unchanged. | **9.60×** parallel export; CSV byte-identical to `COPY ... TO` |
+| 6 | **Both directions, one engine.** `pgfastload.pg_fastload_export()` writes a table (or any `SELECT`) to CSV / BINARY / FIXED through the same Writer and the same `COL`/`OUT_COL` layout, so a fixed-width file loads back unchanged. | **9.60×** parallel export vs serial, **9.33× vs `COPY ... TO`**; CSV byte-identical to `COPY ... TO` |
 
 ### Feature checklist
 
@@ -79,15 +79,17 @@ parsers + one writing leader".
 
 1 GiB / 7.37 M rows CSV (16 vCPU, warm cache, `DIRECT`, no indexes):
 
-| Configuration | Time | vs serial |
-|---|---|---|
-| `PARALLEL=OFF` (upstream serial path) | 5.81 s | 1.00× |
-| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× |
-| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× |
-| `PARALLEL=ON` (15 workers, default) | **1.37 s** | **4.24×** |
+| Configuration | Time | vs serial | vs `COPY ... FROM` |
+|---|---|---|---|
+| `PARALLEL=OFF` (upstream serial path) | 5.81 s | 1.00× | 1.43× |
+| `PARALLEL=ON, PARALLEL_WORKERS=2` | 2.76 s | 2.11× | 3.01× |
+| `PARALLEL=ON, PARALLEL_WORKERS=4` | 1.58 s | 3.68× | 5.27× |
+| `PARALLEL=ON` (15 workers, default) | **1.37 s** | **4.24×** | **6.07×** |
+| `COPY ... FROM` (reference) | 8.32 s | 0.70× | 1.00× |
 
-The serial path is the upstream algorithm with the splitter above, so it is **1.20× upstream
-`pg_bulkload`** and **1.46× `COPY ... FROM`** on the same file. Other sizes, the fixed-length format,
+The serial path is the upstream algorithm with the splitter above, so it is **1.22× upstream
+`pg_bulkload`** and **1.43× `COPY ... FROM`** on the same file; with parallelism on the gap to
+`COPY` widens to **6.07×**. Other sizes, the fixed-length format,
 the reference comparisons and cold-cache results: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ---

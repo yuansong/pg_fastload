@@ -769,8 +769,10 @@ touches bytes; `fastload_verify.py` covers exactly these two cases.
 | `PARALLEL_WORKERS=8` | 1.76 s | **1.40 s** | −20% |
 | `auto` (15) | 1.76 s | **1.37 s** | −22% |
 
-The serial path is now **1.20× upstream** and **1.46× `COPY ... FROM`**; the parallel path is
-4.24× the serial one, with the leader's serial `WriterInsert` (~1.14 s) still the floor.
+The serial path is now **1.22× upstream** and **1.43× `COPY ... FROM`**; the parallel path is
+4.24× the serial one and **6.07× `COPY ... FROM`**, with the leader's serial `WriterInsert`
+(~1.14 s) still the floor. (The four-way table in §21.1 is the pre-change measurement, taken with
+the same method; the ratios here use the post-change batch, whose `COPY` figure is 8.32 s.)
 `<CSV> SPLIT` went 1.92 → 0.90 s; `<CSV> VALUE` (3.82 s) is now 68% of the serial path and is the
 same per-field work `COPY` does, so no further bulk trick is available there.
 

@@ -92,22 +92,25 @@ no bgworker started, content digests match, `MULTI_PROCESS` alone still works no
 
 Conclusion summary (1 GiB CSV, warm cache, median of 3 rounds, DIRECT, no index):
 
-| Config | Time | vs serial |
-|---|---|---|
-| `PARALLEL=OFF` | 5.81 s | 1.00× |
-| `w=1` (serial fallback) | 5.80 s | 1.00× |
-| `w=2` | 2.76 s | 2.11× |
-| `w=4` | 1.58 s | 3.68× |
-| `w=8` | 1.40 s | 4.15× |
-| `auto` (default 15) | 1.37 s | 4.24× |
+| Config | Time | vs serial | vs `COPY ... FROM` |
+|---|---|---|---|
+| `PARALLEL=OFF` | 5.81 s | 1.00× | 1.43× |
+| `w=1` (serial fallback) | 5.80 s | 1.00× | 1.43× |
+| `w=2` | 2.76 s | 2.11× | 3.01× |
+| `w=4` | 1.58 s | 3.68× | 5.27× |
+| `w=8` | 1.40 s | 4.15× | 5.94× |
+| `auto` (default 15) | 1.37 s | 4.24× | 6.07× |
+| `COPY ... FROM` (reference) | 8.32 s | 0.70× | 1.00× |
 
 Against the two reference implementations, same file and same empty table: `PARALLEL=OFF` 5.81 s vs
-upstream `pg_bulkload 3.1.23` 7.00 s (**1.20×**) and vs `COPY ... FROM` 8.48 s (**1.46×**, and 1.32×
+upstream `pg_bulkload 3.1.23` 6.98 s (**1.22×**) and vs `COPY ... FROM` 8.32 s (**1.43×**, and 1.29×
 against `COPY` into an UNLOGGED table). Serial equivalence was re-established before the Round 8 change
 (6.95 s vs 7.09 s, 2%), so the gap is the optimisation, not a behavioural difference.
 
-Fixed-width 1 GiB: serial 1.62 s → fastest parallel 0.89 s (w=8, **1.82×**).
-Under a good window with cold cache (evicted via `posix_fadvise`), it beats serial by up to 4.9×.
+Fixed-width 1 GiB: serial 1.62 s → fastest parallel 0.89 s (w=8, **1.82×**); this mode has no `COPY`
+counterpart, because `COPY` cannot read an unframed fixed-length record.
+Under a good window with cold cache (evicted via `posix_fadvise`), it beats serial by 3.8× and
+`COPY ... FROM` by 5.5×.
 Full methodology, fairness controls, and tiered results: see [BENCHMARK.md](BENCHMARK.md).
 
 **Measurement caveats** (lessons from experience): besides timing, `CHECKPOINT` isolation is mandatory, otherwise the previous round's dirty-page flush creates a

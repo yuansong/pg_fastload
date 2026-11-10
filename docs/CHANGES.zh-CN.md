@@ -696,8 +696,10 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 | `PARALLEL_WORKERS=8` | 1.76 s | **1.40 s** | −20% |
 | `auto`（15） | 1.76 s | **1.37 s** | −22% |
 
-串行路径现在是**上游的 1.20×**、**`COPY ... FROM` 的 1.46×**；并行是串行的 4.24×，
-下限仍是 leader 串行 `WriterInsert`（≈1.14 s）。`<CSV> SPLIT` 1.92 → 0.90 s；`<CSV> VALUE`
+串行路径现在是**上游的 1.22×**、**`COPY ... FROM` 的 1.43×**；并行是串行的 4.24×、
+是 `COPY ... FROM` 的 **6.07×**，下限仍是 leader 串行 `WriterInsert`（≈1.14 s）。
+（§21.1 的四路表是改动前的测量，方法相同；此处的比值取自改动后的批次，其 `COPY` 数值为 8.32 s。）
+`<CSV> SPLIT` 1.92 → 0.90 s；`<CSV> VALUE`
 （3.82 s）已占串行路径 68%，它就是 `COPY` 同样要做的逐字段工作，这块没有批量技巧可挖。
 
 ### 21.4 验证
