@@ -1,42 +1,70 @@
-name: Build RPMs and upload its to release draft
+name: Release
+
+# A version tag (v1.2.3) publishes a GitHub release.  The body is
+# RELEASE_NOTES_<tag>.md, which lives in the repository next to the code it
+# describes, and the tag is checked against include/common.h — so the version,
+# the notes and the documentation cannot drift apart.
+#
+# Re-pushing a tag updates the existing release instead of failing.
 
 on:
   push:
     tags:
-      - 'VERSION*'
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  build_rpms:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        RHEL_VERSION: ["8", "9", "10"]
-        PG_VERSION: ["14", "15", "16", "17", "18"]
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Build PostgreSQL ${{ matrix.PG_VERSION }} RPMs for RHEL ${{ matrix.RHEL_VERSION }}
-      run: |
-        export PG_FASTLOAD_VERSION=$(echo "${GITHUB_REF_NAME#VERSION}" | sed 's/_/./g')
-        docker build .github/workflows/ -t pg_fastload \
-          --build-arg RHEL_VERSION=${{ matrix.RHEL_VERSION }} \
-          --build-arg PG_VERSION=${{ matrix.PG_VERSION }} \
-          --build-arg PG_FASTLOAD_VERSION=${PG_FASTLOAD_VERSION} \
-          --build-arg REPO_URL=https://github.com/${{ github.repository }}.git
-        container_id=$(docker create pg_fastload)
-        docker cp $container_id:/var/lib/pgsql/rpmbuild/RPMS/x86_64 ./RPMS
+      - name: Resolve the tag and the source version
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          ver="${tag#v}"
+          src=$(sed -n 's/.*PG_FASTLOAD_VERSION "\([0-9][0-9.]*\)".*/\1/p' include/common.h | head -n1)
+          echo "tag=${tag}"     >> "$GITHUB_OUTPUT"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "source=${src}"  >> "$GITHUB_OUTPUT"
+          echo "tag: ${tag} / include/common.h: ${src}"
+          if [ -z "${src}" ]; then
+            echo "::error::could not read PG_FASTLOAD_VERSION from include/common.h"
+            exit 1
+          fi
+          if [ "${ver}" != "${src}" ]; then
+            echo "::error::tag ${tag} does not match include/common.h (${src}); bump the version or fix the tag"
+            exit 1
+          fi
 
-    - name: Create release draft and upload the RPMs
-      uses: softprops/action-gh-release@v2
-      with:
-        name: Release draft
-        draft: true
-        files: ./RPMS/*.rpm
+      - name: Locate the release notes
+        id: notes
+        run: |
+          f="RELEASE_NOTES_${{ steps.ver.outputs.tag }}.md"
+          if [ ! -f "$f" ]; then
+            echo "::error::$f is missing — the release body has to ship with the source"
+            ls -1 RELEASE_NOTES_*.md 2>/dev/null || true
+            exit 1
+          fi
+          echo "file=${f}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          title="pg_fastload ${{ steps.ver.outputs.version }}"
+          notes="${{ steps.notes.outputs.file }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release ${tag} exists, updating it"
+            gh release edit "$tag" --title "$title" --notes-file "$notes"
+          else
+            gh release create "$tag" --title "$title" --notes-file "$notes" --verify-tag
+          fi

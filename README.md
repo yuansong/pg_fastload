@@ -463,6 +463,7 @@ Downgrading is a **safety net, not an error**: `PARALLEL=ON` is always safe to e
 | Benchmarks | [docs/BENCHMARK.md](docs/BENCHMARK.md) | [docs/BENCHMARK.zh-CN.md](docs/BENCHMARK.zh-CN.md) |
 | Verification report | [docs/VERIFICATION.md](docs/VERIFICATION.md) | [docs/VERIFICATION.zh-CN.md](docs/VERIFICATION.zh-CN.md) |
 | Optimization log and rejected ideas | [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) | [docs/OPTIMIZATION.zh-CN.md](docs/OPTIMIZATION.zh-CN.md) |
+| Release notes (1.0.0) | [RELEASE_NOTES_v1.0.0.md](RELEASE_NOTES_v1.0.0.md) | [RELEASE_NOTES_v1.0.0.zh-CN.md](RELEASE_NOTES_v1.0.0.zh-CN.md) |
 
 ---
 
