@@ -214,24 +214,51 @@ w8 5.80 / w15 5.66 s，其中首轮含上游 46.57 s 的冷启动异常，整体
 
 ---
 
-## 8. 导出吞吐：`pg_fastload_export` vs `COPY TO`
+## 8. 导出吞吐：`pg_fastload_export` 与 `COPY TO` 对比
 
-导出的反方向没有并行（源是游标、目标是单文件），因此它只需要与 `COPY` 对比：
+导出在设计上就是单进程：一个后端从游标取行、写一个文件，这条路径上没有 `PARALLEL` 关键字。
+因此对比有两面：一面是 `COPY`，另一面是"把同样的字节喂回装载器"。
 
 | 项 | 值 |
 |---|---|
 | 表 | `public.exp_big`：8,000,000 行 / 521 MB 堆表（`id int4` + `pad text`(md5)） |
-| 输出 | CSV，326,888,896 B（312 MiB） |
-| 环境 | 同 §2：16 vCPU / 7.3 GiB，热缓存，3 次取中位 |
-| `COPY ... TO ... (FORMAT csv)` | 0.95 s（≈344 MB/s、8.4M 行/s） |
-| `pg_fastload_export(TYPE=CSV)` | **0.89 s**（≈367 MB/s、9.0M 行/s） |
-| 输出一致性 | `cmp` 相同 |
+| 输出 | CSV，带表头 326,888,903 B（312 MiB） |
+| 环境 | 同 §2：16 vCPU / 7.3 GiB，热缓存，5 轮取中位 |
 
-差值的来源是缓冲与调用开销，而不是算法：导出侧用 4 MiB `StringInfo` 缓冲，字段格式化直接调
-输出函数；`COPY` 走 `DestReceiver`，每行一次回调。两者都是单进程顺序写，因此**结论是"同一量级、
-略快"，不是"更快两个数量级"**。
+| 步骤 | 耗时 | 隔离出的成本 |
+|---|---|---|
+| `SELECT count(*)` | 0.05 s | 读 521 MB 本身不要钱：16 核并行顺序扫描 |
+| `SELECT count(*)`（禁并行扫描） | 0.14 s | 串行扫描堆表的净成本 |
+| `COPY ... TO '/dev/null' (FORMAT csv)` | 0.70 s | 扫描 + CSV 格式化，不落文件 |
+| `COPY (SELECT ...) TO '/dev/null'` | 0.74 s | 允许或禁止并行计划都一样 |
+| `COPY ... TO '<文件>' (FORMAT csv)` | 0.80 s | 再加 0.10 s 写 327 MB |
+| `pg_fastload_export(TYPE=CSV)` → `/dev/shm` | 0.86 s | 只有格式化，无磁盘 |
+| `pg_fastload_export(TYPE=CSV)` → 磁盘 | **0.90 s** | ≈363 MB/s、8.9M 行/s |
+| `pg_fastload_export(TYPE=BINARY)` → 磁盘 | 0.94 s | 定长布局 288,000,000 B |
+| `pg_fastload_export(QUERY=SELECT id ...)` | 0.49 s | 单列，62.9 MB |
+| 把同一份 CSV 装回来，`PARALLEL=OFF` | 1.06 s | UNLOGGED 目标表、`WRITER=DIRECT` |
+| 把同一份 CSV 装回来，`PARALLEL_WORKERS=4` | 0.48 s | 串行装载的 2.2 倍 |
 
-定长导出（`TYPE=BINARY/FIXED`）没有单独计时：它的写路径是 `Write_char`/`memcpy` 直接落缓冲区，
-比 CSV 的文本格式化更便宜，不会成为瓶颈；`NULLIF` 与宽度校验的开销在解析器侧一次完成。
+怎么读这张表：时间不在扫描上。串行扫一遍 521 MB 只要 0.14 s，而 `COPY (SELECT ...) TO '/dev/null'`
+在允许与禁止并行计划下都是 0.74 s，说明这些路径里约 0.70 s 是 writer 的逐行工作。我们这 0.90 s 中，
+约 0.48 s 与"写什么"无关 —— 游标往返、`heap_deform_tuple`、每行一对
+`MemoryContextSwitchTo`/`Reset`；0.40 s 是 264 MB 的 `pad` 列做文本输出与加引号扫描；真正落盘
+只有 0.04 s。所以瓶颈既不是输出文件也不是 I/O，而是**单个后端内的 CPU**：16 核里 15 核在空转，
+而且游标本身根本不能用并行计划。`PROGRESS=ON` 不额外收费（两种写法都是 0.90 s），时钟每 512 行
+才采一次。
+
+两个必须说清的结论：
+
+* **导出比 `COPY TO` 慢约 12%**（0.90 s 对服务端 0.80 s）。本节早先写的 0.95 s 是 `psql` 的
+  `\copy`，800 万行要走一趟客户端往返；服务端 `COPY` 没有这笔开销。输出仍是 `cmp` 逐字节相同，
+  而这条路径同时驱动 BINARY/FIXED，用一个共享 writer 换 0.10 s 是划算的。
+* **BINARY 并不比 CSV 便宜**（0.94 s 对 0.90 s），与"`memcpy` 式写入更快"的直觉相反：定长导出
+  先跑 tuple checker —— 建一个强制转换后的元组、把每个字段拷进声明的宽度 —— 这抵消了它省下的
+  文本转换。
+
+要让这条路径并行，必须保住行序（否则 `cmp` 对不上、往返也不成立），唯一可行设计是按 ctid 区间
+切分到各 worker 的临时文件、最后按序拼接，而拼接本身要给整个输出补一次完整读+写。并行装载的
+0.48 s 是忽略拼接的上界，这台机器上的现实上限约 2×。因此保留为文档化的取舍
+（USER_MANUAL §15 第 11 条），不在 v1.0.0 里交付。
 
 ---

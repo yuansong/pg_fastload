@@ -304,15 +304,25 @@ bgworker 真启动（日志有 `PARALLEL=ON, TYPE=CSV, workers=N` 且无 `PARALL
 | 错误路径 | 缺 `OUTPUT`／相对路径／`BINARY` 缺 `OUT_COL`／`FIXED`+`INTEGER`／`OUT_COL` 数量不符／目标已存在／NULL 无 `NULLIF`／未知关键字／缺 `TABLE`+`QUERY`／非 `SELECT` 的 `QUERY`／`DELIMITER=QUOTE`，11 条全部按预期报错 | PASS |
 | 进度 | 800 万行导出期间另一会话读到 `export\|running\|CSV\|serial\|true\|-\|true\|/tmp/.../big.csv`；结束后视图 0 行；产物 > 100 MB、8,000,000 行 | PASS |
 
-吞吐对照（`public.exp_big`，800 万行 / 521 MB 表 / 312 MiB CSV，热缓存 3 次）：
+吞吐（`public.exp_big`，800 万行 / 521 MB 表 / 312 MiB CSV，热缓存，5 轮取中位）：
 
-| 操作 | 中位耗时 |
+| 操作 | 耗时 |
 |---|---|
-| `COPY ... TO ... (FORMAT csv)` | 0.95 s |
-| `pg_fastload_export(TYPE=CSV)` | **0.89 s** |
+| `SELECT count(*)`（16 核并行顺序扫描） | 0.05 s |
+| `COPY ... TO '/dev/null' (FORMAT csv)` | 0.70 s |
+| `COPY ... TO '<文件>' (FORMAT csv)` | 0.80 s |
+| `pg_fastload_export(TYPE=CSV)` → `/dev/shm` | 0.86 s |
+| `pg_fastload_export(TYPE=CSV)` → 磁盘 | **0.90 s** |
+| `pg_fastload_export(TYPE=BINARY)` → 磁盘 | 0.94 s |
+| `pg_fastload_export(QUERY=SELECT id ...)` | 0.49 s |
+| 同一份 CSV 装回来，`PARALLEL=OFF` | 1.06 s |
+| 同一份 CSV 装回来，`PARALLEL_WORKERS=4` | 0.48 s |
 
-输出 `cmp` 相同（326,888,896 B）。导出不参与并行，这是设计选择而非未完成项（见
-[ARCHITECTURE §4.1](ARCHITECTURE.zh-CN.md#41-反方向导出数据流)）。
+输出 `cmp` 相同（带表头 326,888,903 B）。导出不参与并行，这是设计选择而非未完成项（见
+[ARCHITECTURE §4.1](ARCHITECTURE.zh-CN.md#41-反方向导出数据流)）。分解也说明了原因：0.90 s 里
+CPU 全部压在单个后端上，16 核中 15 核空转，真正落盘只占 0.04 s。证据：`export_perf.out`、
+`export_perf2.out`、`export_perf_bin.out`；数字与解读见
+[BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
 
 回归：导出只新增 writer 与字节计数，装载路径未改；验收后重跑 `fastload_verify.py` 与
 `fastload_verify_fixed.py` 仍为 90/90 与 44/44。

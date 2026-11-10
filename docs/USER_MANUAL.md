@@ -766,7 +766,10 @@ Notes:
 8. `WRITER=PARALLEL` uses a separate transaction (upstream behaviour) and is not atomic with the caller.
 9. Fully verified only on PostgreSQL 18.6 / x86_64 Linux.
 10. During a parallel load the target table holds an `AccessExclusiveLock`, excluding any concurrent access.
-11. Export ([§18](#18-exporting-table-data-pg_fastload_export)) runs single-process serially; `PARALLEL` has no effect on it.
+11. Export ([§18](#18-exporting-table-data-pg_fastload_export)) runs single-process serially; `PARALLEL`
+    has no effect on it. The bottleneck is the CPU of that one backend (1 of 16 cores), and the file
+    write is only ~4% of the time — see
+    [BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to).
 12. A fixed-width export pads every field: reloading a text column as `CHAR(n)` loses trailing blanks, as
     `VARCHAR(n)` keeps the padding — neither is an exact round trip (see [§18.5](#185-round-trip-semantics-read-this-section)).
 
@@ -893,9 +896,11 @@ values). By default NULL is written as an empty field; `NULL=\N` separates the t
 - `HEADER=ON` writes the column names from the result `TupleDesc` (expression columns in `QUERY=`
   may be named `?column?`).
 - Empty table without `HEADER` → 0-byte file; empty table with `HEADER=ON` → just the header line.
-- Throughput: an 8M-row / 312 MiB table exports in 0.89 s from page cache (`COPY TO` takes 0.95 s,
-  and the outputs are `cmp`-identical). Both are single-process sequential writers; the export is
-  slightly faster because of its 4 MiB buffer and the absence of a per-row `DestReceiver`.
+- Throughput: an 8M-row / 312 MiB table exports in 0.90 s from page cache (≈363 MB/s, 8.9M rows/s);
+  server-side `COPY TO` on the same table takes 0.80 s with `cmp`-identical output. The export is
+  single-process and CPU-bound in one backend — roughly 0.48 s of per-row cursor/deform/context
+  overhead, 0.40 s of text formatting, 0.04 s of file writing — so it does not use the other cores.
+  [BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to) has the breakdown.
 
 ### 18.4 BINARY / FIXED: fixed-width layout and a sample control file
 

@@ -326,8 +326,9 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 
 - `TABLE` 在这里是**源**，`OUTPUT` 在这里是**文件**（与装载相反）；`QUERY=` 可代替 `TABLE=`；
 - 目标是服务端本地路径、必须绝对路径、已存在则报错，绝不覆盖；需要超级用户；
-- 单进程串行（不接 `PARALLEL`）。800 万行 / 312 MiB 热缓存导出 **0.89 s**，`COPY TO` 为 0.95 s，
-  两者输出 `cmp` 相同；
+- 单进程串行（不接 `PARALLEL`）。800 万行 / 312 MiB 热缓存导出 **0.90 s**（≈363 MB/s），
+  服务端 `COPY TO` 为 0.80 s，两者输出 `cmp` 相同。瓶颈在单后端的 CPU 而不是 I/O，
+  分解见 [BENCHMARK §8](docs/BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)；
 - 定长格式的文本列会被补空格到声明宽度，回灌时 `COL=CHAR(n)` 裁掉、`COL=VARCHAR(n)` 保留 ——
   想精确往返回去就用 `CHAR(n)`（代价是原值的尾随空格丢失）。细节与限制见
   [USER_MANUAL §18](docs/USER_MANUAL.zh-CN.md#18-导出表数据pg_fastload_export)。
