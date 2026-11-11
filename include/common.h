@@ -2,6 +2,7 @@
  * pg_fastload: include/common.h
  *
  *	  Copyright (c) 2010-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 /**

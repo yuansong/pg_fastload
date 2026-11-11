@@ -2,6 +2,7 @@
  * pg_fastload: lib/parser_tuple.c
  *
  *	  Copyright (c) 2009-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 /**

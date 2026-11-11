@@ -2,6 +2,7 @@
  * pg_fastload: lib/writer_binary.c
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 #include "pg_fastload.h"

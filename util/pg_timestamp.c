@@ -2,6 +2,7 @@
  * pg_fastload: util/pg_timestamp.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 #include "postgres.h"
 

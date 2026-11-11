@@ -7,6 +7,7 @@
  * this file has functions which related to nbtsort, but is not implemented core's code.
  *
  *	  Copyright (c) 2021-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 

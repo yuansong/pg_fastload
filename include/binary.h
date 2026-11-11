@@ -2,6 +2,7 @@
  * pg_fastload: include/binary.h
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 /**

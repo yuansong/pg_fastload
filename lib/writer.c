@@ -2,6 +2,7 @@
  * pg_fastload: lib/writer.c
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 /**
