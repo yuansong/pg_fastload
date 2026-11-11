@@ -824,7 +824,7 @@ ParseOptions(Datum options, Reader **rd, Writer **wt, time_t tm,
 	 * unique-index spool merge, which SKIP_INDEX is about to remove.
 	 * (ON_DUPLICATE_KEEP is inert without a unique index and stays allowed.)
 	 */
-	if (skip_index && (*wt)->max_dup_errors > 0)
+	if (skip_index_opt && (*wt)->max_dup_errors > 0)
 		ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 			 errmsg("SKIP_INDEX cannot be combined with DUP_ERRORS"),

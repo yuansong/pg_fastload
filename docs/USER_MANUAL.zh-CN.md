@@ -291,7 +291,7 @@ KEY = 'VALUE WITH SPACES'
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
 | `INPUT` / `INFILE` | 路径或 `STDIN` | 无（必填） | 输入文件。仅 `STDIN` 时按客户端编码处理 |
-| `SKIP` / `OFFSET` | 整数 ≥ 0 | `0` | 跳过前 N 个**输入行**（`\n`、`\r\n` 或单个 `\r` 都算行尾；不识别引号，因此跨行的带引号记录会算作多行 —— 与 pg_bulkload 规则一致） |
+| `SKIP` / `OFFSET` | 整数 ≥ 0 | `0` | 跳过前 N 个**输入行**（`\n`、`\r\n` 或单个 `\r` 都算行尾；不识别引号，因此跨行的带引号记录会算作多行 —— 与 pg_bulkload 规则一致）。`SKIP` 大于文件物理行数时报错（`could not skip N lines`），而不是得到空装载 |
 | `LOAD` / `LIMIT` | 整数 | 不限 | 最多装载 N 条记录（`SKIP` 之后计数） |
 | `ENCODING` | 编码名 | 数据库编码 | 输入文件编码；需要逐字段转码 |
 
@@ -301,7 +301,7 @@ KEY = 'VALUE WITH SPACES'
 |---|---|---|---|
 | `OUTPUT` / `TABLE` | `schema.table` | 无（必填） | 目标表；只写表名，**不写库名**（库由连接决定） |
 | `TRUNCATE` | `YES` / `NO` | `NO` | 装载前清空目标表 |
-| `SKIP_INDEX` | `YES` / `NO` | `NO` | 装载期间丢弃目标表的二级索引，装载完成后由用户自行重建（见下） |
+| `SKIP_INDEX` | 任意 PostgreSQL 布尔值（`ON`/`OFF`/`YES`/`NO`/`TRUE`/`FALSE`/`1`/`0`） | `OFF` | 装载期间丢弃目标表的二级索引，装载完成后由用户自行重建（见下） |
 | `VERBOSE` | `YES` / `NO` | `NO` | 输出更详细的进度日志 |
 
 **`SKIP_INDEX=ON`。** 装载期间维护索引的代价与装载本身相当（实测单个 btree 约 1.9 s/GiB，
@@ -336,7 +336,7 @@ CSV 语义细节见 [§9.1](#91-csv)。
 
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
-| `COL` | `name type [NULLIF 'pattern']` | 无（必填） | 一列一个 `COL`；`type` 见下表 |
+| `COL` | `type [ (size \| start:end) ] [ NULLIF {'str' \| hex} ]` | 无（必填） | 一列一个 `COL`，**按文件列序声明——没有列名**；`type` 见下表 |
 | `STRIDE` | 整数 > 0 | 字段长度之和 | 每条记录的字节长度（含填充） |
 | `PRESERVE_BLANKS` | `YES` / `NO` | `NO` | `CHAR`/`VARCHAR` 是否保留尾部空格 |
 | `FILTER` | 函数名 | 无 | 同 CSV |
@@ -357,9 +357,9 @@ CSV 语义细节见 [§9.1](#91-csv)。
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
 | `PARSE_ERRORS` / `MAX_ERR_CNT` | 整数，`-1` = 不限 | `0` | 允许的解析错误数；**超过即停止读取**（已装载的行保留，本次调用正常返回，不报错） |
-| `PARSE_BADFILE` | 路径 | `{log-basename}.prs.{ext}` | 解析失败记录的落盘文件 |
+| `PARSE_BADFILE` | 路径 | `{default-basename}.prs.{输入文件扩展名}` | 解析失败记录的落盘文件；默认基名为 `$PGDATA/pg_fastload/YYYYMMDDHHMMSS_{db}_{nsp}_{tbl}` —— 自定义 `LOGFILE` **不会**改变它，想与日志同处请显式给路径 |
 | `DUPLICATE_ERRORS` | 整数，`-1` = 不限 | `0` | 允许的重复键错误数 |
-| `DUPLICATE_BADFILE` | 路径 | `{log-basename}.dup.csv` | 重复键冲突记录的落盘文件 |
+| `DUPLICATE_BADFILE` | 路径 | `{default-basename}.dup.csv` | 重复键冲突记录的落盘文件（基名规则同 `PARSE_BADFILE`） |
 | `ON_DUPLICATE_KEEP` | `NEW` / `OLD` | `NEW` | 重复时保留新值还是旧值 |
 | `CHECK_CONSTRAINTS` | `YES` / `NO` | `NO` | 是否校验目标表的 CHECK 约束 |
 
@@ -374,7 +374,7 @@ CSV 语义细节见 [§9.1](#91-csv)。
 | 关键字 | 取值 | 默认 | 说明 |
 |---|---|---|---|
 | `PARALLEL` | `ON` / `OFF` | `OFF` | 打开多进程并行加载 |
-| `PARALLEL_WORKERS` | `1`..`64` | 在线 CPU 核数 − 1（≥1） | 解析 worker 数；`≤1` 直接串行落回 |
+| `PARALLEL_WORKERS` | `1`..`64` | 在线 CPU 核数 − 1（≥1） | 解析 worker 数；`0`、负数或 `>64` 直接 **ERROR**，`1` 串行落回 |
 
 ### 6.9 加载进度（pg_fastload 新增）
 
@@ -492,9 +492,9 @@ pg_fastload -d tpcc base.ctl -o SKIP=1000000 -o LIMIT=100000
 ```
 TYPE   = FIXED
 STRIDE = 100
-COL    = id      INTEGER
-COL    = name    VARCHAR NULLIF ','
-COL    = amount  DOUBLE
+COL    = INTEGER            -- 4 字节：第 1 个字段
+COL    = VARCHAR NULLIF ',' -- 文本，以分隔符结束
+COL    = DOUBLE             -- 8 字节
 ```
 
 - 记录长度固定为 `STRIDE`；字段按 `COL` 声明顺序依次排布；
@@ -546,7 +546,7 @@ PARALLEL_WORKERS = 8      # 可省略
 
 | # | 条件 | INFO 内容形态 |
 |---|---|---|
-| 1 | 有效 worker ≤ 1 | `PARALLEL disabled (workers=1)` |
+| 1 | 有效 worker = 1（`0`/负数/`>64` 在解析期直接拒绝） | `PARALLEL disabled (workers=1)` |
 | 2 | `TYPE` 为 `TUPLE` / `FUNCTION` | `PARALLEL disabled (TYPE=...)` |
 | 3 | 指定 `FILTER` / `FORCE_NOT_NULL` | `PARALLEL disabled (FILTER)` 等 |
 | 4 | 目标表有 dropped 列 | `PARALLEL disabled (dropped columns)` |
@@ -586,7 +586,9 @@ SELECT count(*) || '|' || sum(hash_record_extended(t, 0)) FROM public.t AS t;
 
 - **需要容错装载就用 `PARALLEL=OFF`**；
 - 并行路径适合"数据已清洗、要求快"的场景。它对被拒绝的记录采取**全有或全无**：出错记录之后的那些行此时已在其他 worker 的队列里，若沿用"保留错误前已读行"的语义，结果会依赖 worker 时序，可能装载出 pg_bulkload 永远不会装载的不确定超集；
-- `PARSE_BADFILE` / `DUPLICATE_BADFILE` 未指定时按 `LOGFILE` 基名派生，位于同一目录。
+- `PARSE_BADFILE` / `DUPLICATE_BADFILE` 未指定时使用默认基名
+  `$PGDATA/pg_fastload/<时间戳>_<db>_<nsp>_<tbl>`（跟随的是*默认*日志名，而非自定义的
+  `LOGFILE`）；要控制落盘位置请显式传参。
 
 ---
 
@@ -661,6 +663,9 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 ------+---------+-----------------+------------+----------+---------+-----------------+---------+------------+-------------
  4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 | 1073741824
 ```
+
+（上面示例为便于阅读省略了部分列——`backend_start`、`started`、`direction`、`infile` 同样存在；
+视图共 20 列，完整示例见 §18.7，权威列表以 SQL 定义为准。）
 
 | 列 | 含义 |
 |---|---|
@@ -746,7 +751,9 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 | `INPUT option required` / `OUTPUT option required` | 缺必填项 | 补全 |
 | `unterminated CSV quoted field` | 引号未闭合 | 修数据；或 `PARALLEL=OFF` 观察逐行错误 |
 | `invalid TYPE "XXX"` | 类型名不支持 | 用 `CSV`/`BINARY`/`FIXED`/`TUPLE`/`FUNCTION` |
-| 装载后表为空但无报错 | `LIMIT=0` / `SKIP` 超过行数 / 目标表被并发清空 | 检查参数与并发 |
+| 装载后表为空但无报错 | `LIMIT=0` / 目标表被并发清空（`SKIP` 超过文件末尾是**报错**，不是空装载） | 检查参数与并发 |
+| `could not skip N lines in the input file` | `SKIP` 大于输入文件物理行数 | 调小 `SKIP`，或检查文件行尾 |
+| `could not resize shared memory segment "...": No space left on device` | `/dev/shm` 耗尽——被 `SIGKILL` 的后端遗留 DSM 段，或 worker 过多 | 调小 `PARALLEL_WORKERS`、扩大 `/dev/shm`，或重启实例 |
 | `DIRECT` 装载异常中断后表不可用 | 数据文件已写但未提交，LSF 残留 | `pg_fastload -r -D $PGDATA` 恢复（按 LSF 记录清理并删除状态文件） |
 | 装载成功但应用看不到数据 | `WRITER=PARALLEL` 的独立事务已提交，或调用方未 `COMMIT` | 检查事务边界 |
 
@@ -759,15 +766,13 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 3. 并行路径假设输入编码 = 数据库编码。
 4. `TUPLE` / `FUNCTION` 未并行化。
 5. 定长并行：`NULLIF` 模式 ≤ 64 字节；记录必须完整 `STRIDE`。
-6. 单条记录上限 256 MiB。
+6. 单条记录上限 256 MiB（并行路径；串行路径仅受内存限制，实测 17 MiB 单行记录可正常装载）。
 7. 需要 `max_worker_processes ≥ PARALLEL_WORKERS + 1`。
 8. `WRITER=PARALLEL` 使用独立事务（上游行为），与调用方事务不原子。
-9. 仅在 PostgreSQL 18.6 / x86_64 Linux 上完整验证。
+9. 发布二进制仅在 PostgreSQL 18.6 / x86_64 Linux 上完整验证；源码树另在
+   15.19 / 16.15 / 17.11 / 18.6 / 19rc1 上编译通过（CI 矩阵）。
 10. 并行装载期间目标表持有 `AccessExclusiveLock`，与任何并发访问互斥。
-11. 导出（[§18](#18-导出表数据pg_fastload_export)）是单进程串行的，`PARALLEL` 对它无效；
-    瓶颈是单个后端的 CPU（16 核里只用到 1 核），落盘只占约 4%，见
-    [BENCHMARK §8](BENCHMARK.zh-CN.md#8-导出吞吐pg_fastload_export-与-copy-to-对比)。
-12. 定长导出用定宽字段，文本列回灌时 `CHAR(n)` 会丢尾随空格、`VARCHAR(n)` 会保留补位空格，
+11. 定长导出用定宽字段，文本列回灌时 `CHAR(n)` 会丢尾随空格、`VARCHAR(n)` 会保留补位空格，
     二者都不等于"精确往返"（见 [§18.5](#185-往返语义务必读这一节)）。
 
 ---
@@ -932,7 +937,9 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 格式，只接受 `CHAR(n)` / `VARCHAR(n)`，写 `OUT_COL=INTEGER` 会被拒绝
 （`TYPE=FIXED writes text only`）。数值列想用原生字节序就用 `BINARY`。
 
-导出还会在 `<OUTPUT>.ctl` 写一份样例控制文件，可以直接对着它改：
+导出还会在 `<OUTPUT>.ctl` 写一份样例控制文件，可以直接对着它改（仅 BINARY / FIXED 导出——
+CSV 导出不写样例）。与输出文件一样，样例以 `O_EXCL` 创建、从不覆盖：残留的旧
+`<OUTPUT>.ctl` 会让新导出报 `File exists` 失败，删掉它即可。
 
 ```ini
 INPUT = /data/lineitem.bin

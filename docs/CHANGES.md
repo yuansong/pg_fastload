@@ -821,6 +821,41 @@ time). Users who plan to rebuild anyway can now pass `SKIP_INDEX=ON`:
 conflict guard, no-index no-op, percent/ETA NOTICE stream, QUERY= keeps percent NULL), plus the
 standard regressions `fastload_verify.py` **90/90** and `fastload_verify_fixed.py` **44/44**.
 
+## 24. Boundary-condition audit: one real bug fixed, manual corrected (2026-11-11)
+
+A 46-case boundary suite (`util/fl_boundary_test.sh`, cases T01–T46) was derived clause-by-clause
+from the user manual and executed on PG 18.6. It caught one real code defect and a series of
+doc-vs-code mismatches.
+
+### 24.1 Bug fix: `DUPLICATE_ERRORS > 0` always failed
+
+The `SKIP_INDEX` guard in `ParseOptions()` (`lib/pg_fastload.c`) tested `skip_index` — the
+`bool *` out-parameter, which is always non-NULL — instead of the parsed local
+`skip_index_opt`. Every load with `DUPLICATE_ERRORS > 0` therefore aborted with the misleading
+`ERROR: SKIP_INDEX cannot be combined with DUP_ERRORS`, whether or not `SKIP_INDEX` was given,
+on both the SQL and CLI paths (the VM's deployed 1.0.0 `.so` carried the same defect). One-line
+fix: `if (skip_index_opt && (*wt)->max_dup_errors > 0)`.
+
+### 24.2 Doc corrections (both languages)
+
+- `COL` / `OUT_COL` syntax has **no column name** — upstream syntax is `COL = type [(size|B:E)]
+  [NULLIF ...]`; the manual's `COL = name type` form never worked ("invalid typename").
+- Default `PARSE_BADFILE` / `DUPLICATE_BADFILE` follow the *default* timestamped basename in
+  `$PGDATA/pg_fastload/`, not a custom `LOGFILE`.
+- `SKIP` past end-of-file raises `could not skip N lines` (not an empty load).
+- `PARALLEL_WORKERS`: `0`/negative/`>64` are ERRORs; only `1` downgrades to serial.
+- Known-limitations list: removed the stale "export is single-process" item (parallel export has
+  existed since §20); the 256 MiB record cap applies to the parallel path; version-support
+  wording aligned with the README.
+- Documented: the sample `.ctl` is `O_EXCL` (a stale copy fails the export) and only written for
+  BINARY/FIXED exports; the progress-view sample is a column excerpt (20 columns total); a new
+  troubleshooting row for `/dev/shm` exhaustion after a `SIGKILL`ed parallel load.
+
+### 24.3 Verification
+
+`fl_boundary_test.sh` **46/46**, `fastload_verify.py` **90/90**, `fastload_verify_fixed.py`
+**44/44**, `verify_skipindex_export.py` **20/20** on PG 18.6 with the rebuilt `.so`.
+
 ---
 
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

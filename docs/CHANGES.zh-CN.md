@@ -711,5 +711,70 @@ quoted / lone-CR / cross-chunk / 空行 / 多余列这些用例正好钉住慢�
 
 ---
 
+## 22. `SKIP_INDEX=ON`：装载期间跳过索引维护（2026-11-10）
+
+DIRECT 装载通过 spool 批量构建维护索引，在带索引表上代价约 1.9 s/GiB（实测：无索引 1.99 s，
+单个 btree 3.87 s——索引约占装载时间一半）。本来就打算装载后重建的用户现在可以传
+`SKIP_INDEX=ON`：
+
+- `pg_fastload.c` 在 `TRUNCATE` 之后、`WriterInit` 之前用 `SkipTargetIndexes()` 枚举目标表索引
+  （writer 在 `SpoolerOpen` 才打开索引上下文，所以删除必须更早）。每个索引用 `DROP INDEX`
+  在装载事务内删除——装载失败时删除随事务一起回滚，表绝不会处于"没索引"的中间态。
+- 收集到的全部 `CREATE INDEX` 语句（逐字保留 `WHERE` 部分索引与排序规则）在装载结束时同时
+  打到 `LOGFILE` 和 `NOTICE`，重建可直接复制粘贴；`NOTICE` 还会说明删了几个索引。
+- **守卫**：`SKIP_INDEX` 与 `ON_DUPLICATE` / `DUP_ERRORS` 组合时直接 `ERROR` 拒绝——两者都
+  依赖 `SKIP_INDEX` 要删掉的唯一索引。默认的 `ON_DUPLICATE`（无操作）不受影响。没有索引的表
+  装载行为不变（`INFO` 说明没有索引可删）。
+
+## 23. 导出进度 `percent`/`eta_seconds` 与快照审计（2026-11-10）
+
+- `ProgressInfo` 新增 `total_rows_hint`。`pg_fastload_export()` 对 `TABLE=` 导出从
+  `pg_class.reltuples` 填充（串行路径短暂以 `AccessShareLock` 打开关系取值；并行路径复用已打开
+  的 `rel->rd_rel->reltuples`）；`QUERY=` 导出保持 0（无法估计）。`ProgressInit()` 现在优先取
+  有限的 `LIMIT`，其次取该提示，`progress.c` 里已有的按行数百分比与 ETA 逻辑零新参数即可点亮。
+  视图把运行中的百分比钳在 99.9%（`reltuples` 只是估计）；收尾行恒为 `100.0% | done`。
+- 导出日志现在记录快照指纹（`snapshot: xmin=… xmax=… cid=…`），"这份文件由哪个 MVCC 快照产出"
+  仅凭 `LOGFILE` 即可回答。快照语义本身（单一快照、序列化进 DSM 给并行 worker、导出期间持有）
+  早已正确——见 USER_MANUAL §18.8。
+
+### 23.1 验证
+
+`verify_skipindex_export.py` **20/20**（删索引 + NOTICE + DDL 往返 + 摘要一致、冲突守卫、
+无索引空操作、percent/ETA NOTICE 流、`QUERY=` 保持 percent 为 NULL），加上标准回归
+`fastload_verify.py` **90/90**、`fastload_verify_fixed.py` **44/44**。
+
+## 24. 边界条件审计：修复一个真实 bug，纠正手册（2026-11-11）
+
+从用户手册逐条推导出 46 个边界用例（`util/fl_boundary_test.sh`，T01–T46），在 PG 18.6 上执行。
+抓到一个真实代码缺陷与一系列"文档≠代码"的不一致。
+
+### 24.1 Bug 修复：`DUPLICATE_ERRORS > 0` 一律失败
+
+`ParseOptions()`（`lib/pg_fastload.c`）里的 `SKIP_INDEX` 守卫判断的是 `skip_index`——
+`bool *` 出参，恒非空——而不是已解析的局部变量 `skip_index_opt`。于是任何带
+`DUPLICATE_ERRORS > 0` 的装载都误报 `ERROR: SKIP_INDEX cannot be combined with DUP_ERRORS`，
+无论是否给了 `SKIP_INDEX`，SQL 与 CLI 路径皆然（VM 上部署的 1.0.0 `.so` 带同一缺陷）。
+一行修复：`if (skip_index_opt && (*wt)->max_dup_errors > 0)`。
+
+### 24.2 文档纠正（双语同步）
+
+- `COL` / `OUT_COL` 语法**没有列名**——上游语法是 `COL = type [(size|B:E)] [NULLIF ...]`；
+  手册写的 `COL = 列名 类型` 从来不可用（报 `invalid typename`）。
+- 默认 `PARSE_BADFILE` / `DUPLICATE_BADFILE` 跟随 `$PGDATA/pg_fastload/` 下的*默认*时间戳基名，
+  而非自定义 `LOGFILE`。
+- `SKIP` 超过文件末尾报 `could not skip N lines`（不是空装载）。
+- `PARALLEL_WORKERS`：`0`/负数/`>64` 直接 ERROR；只有 `1` 降级串行。
+- 已知限制清单：删除过时的"导出单进程串行"条目（§20 起导出已并行）；256 MiB 记录上限仅限
+  并行路径；版本支持表述与 README 对齐。
+- 新增文档：样例 `.ctl` 以 `O_EXCL` 创建（残留副本会让导出失败）且仅 BINARY/FIXED 导出写出；
+  进度视图示例为列节选（共 20 列）；排障表新增 `SIGKILL` 后 `/dev/shm` 耗尽一行。
+
+### 24.3 验证
+
+重建 `.so` 后 PG 18.6 上：`fl_boundary_test.sh` **46/46**、`fastload_verify.py` **90/90**、
+`fastload_verify_fixed.py` **44/44**、`verify_skipindex_export.py` **20/20**。
+
+---
+
 *未采纳方案汇总见 [OPTIMIZATION.zh-CN.md](OPTIMIZATION.zh-CN.md#八未采纳方案汇总)；性能数据见
 [BENCHMARK.md](BENCHMARK.md)；验证结论见 [VERIFICATION.md](VERIFICATION.md)。*

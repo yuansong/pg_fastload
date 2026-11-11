@@ -286,7 +286,7 @@ Every keyword can also be supplied on the command line with `-o KEY=VALUE`
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
 | `INPUT` / `INFILE` | path or `STDIN` | required | input file; `STDIN` uses the client encoding |
-| `SKIP` / `OFFSET` | integer ≥ 0 | `0` | skip the first N **input lines** (`\n`, `\r\n` or a lone `\r` ends a line; quote marks are not honoured, so a multi-line quoted record counts as several lines — same rule as pg_bulkload) |
+| `SKIP` / `OFFSET` | integer ≥ 0 | `0` | skip the first N **input lines** (`\n`, `\r\n` or a lone `\r` ends a line; quote marks are not honoured, so a multi-line quoted record counts as several lines — same rule as pg_bulkload). A `SKIP` greater than the number of physical lines is an **error** (`could not skip N lines`), not an empty load |
 | `LOAD` / `LIMIT` | integer | unlimited | load at most N records (counted after `SKIP`) |
 | `ENCODING` | encoding name | database encoding | input encoding; requires per-field conversion |
 
@@ -296,7 +296,7 @@ Every keyword can also be supplied on the command line with `-o KEY=VALUE`
 |---|---|---|---|
 | `OUTPUT` / `TABLE` | `schema.table` | required | target table; table name only, **no database name** (the connection decides) |
 | `TRUNCATE` | `YES` / `NO` | `NO` | truncate the target before loading |
-| `SKIP_INDEX` | `YES` / `NO` | `NO` | drop the target's secondary indexes for the load; rebuild them yourself afterwards (see below) |
+| `SKIP_INDEX` | any PostgreSQL boolean (`ON`/`OFF`/`YES`/`NO`/`TRUE`/`FALSE`/`1`/`0`) | `OFF` | drop the target's secondary indexes for the load; rebuild them yourself afterwards (see below) |
 | `VERBOSE` | `YES` / `NO` | `NO` | more detailed progress logging |
 
 **`SKIP_INDEX=ON`.** Maintaining indexes during a load costs about as much as
@@ -338,7 +338,7 @@ CSV semantics: [§9.1](#91-csv).
 
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
-| `COL` | `name type [NULLIF 'pattern']` | required | one `COL` per column; types below |
+| `COL` | `type [ (size \| start:end) ] [ NULLIF {'str' \| hex} ]` | required | one `COL` per column, **in file order — there is no column name**; types below |
 | `STRIDE` | integer > 0 | sum of field lengths | bytes per record (including padding) |
 | `PRESERVE_BLANKS` | `YES` / `NO` | `NO` | keep trailing blanks in `CHAR`/`VARCHAR` |
 | `FILTER` | function name | none | as CSV |
@@ -360,9 +360,9 @@ reason fixed-length loading is several times faster than CSV.
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
 | `PARSE_ERRORS` / `MAX_ERR_CNT` | integer, `-1` = unlimited | `0` | tolerated parse errors; **exceeding it stops reading** (rows already loaded are kept and the call returns normally, without an error) |
-| `PARSE_BADFILE` | path | `{log-basename}.prs.{ext}` | where failed records are written |
+| `PARSE_BADFILE` | path | `{default-basename}.prs.{ext-of-infile}` | where failed records are written; the default basename is `$PGDATA/pg_fastload/YYYYMMDDHHMMSS_{db}_{nsp}_{tbl}` — a custom `LOGFILE` does **not** change it, so pass the path explicitly when you want it next to your log |
 | `DUPLICATE_ERRORS` | integer, `-1` = unlimited | `0` | tolerated duplicate-key errors |
-| `DUPLICATE_BADFILE` | path | `{log-basename}.dup.csv` | where duplicate rows are written |
+| `DUPLICATE_BADFILE` | path | `{default-basename}.dup.csv` | where duplicate rows are written (same basename rule as `PARSE_BADFILE`) |
 | `ON_DUPLICATE_KEEP` | `NEW` / `OLD` | `NEW` | keep the new or the old row on conflict |
 | `CHECK_CONSTRAINTS` | `YES` / `NO` | `NO` | validate target CHECK constraints |
 
@@ -377,7 +377,7 @@ reason fixed-length loading is several times faster than CSV.
 | Keyword | Values | Default | Notes |
 |---|---|---|---|
 | `PARALLEL` | `ON` / `OFF` | `OFF` | enable the multi-process parallel load |
-| `PARALLEL_WORKERS` | `1`..`64` | online CPUs − 1 (≥ 1) | number of parser workers; `≤ 1` falls back to serial |
+| `PARALLEL_WORKERS` | `1`..`64` | online CPUs − 1 (≥ 1) | number of parser workers; `0`, negative or `> 64` is an **ERROR**, `1` falls back to the serial path |
 
 ### 6.9 Progress (new in pg_fastload)
 
@@ -498,9 +498,9 @@ pg_fastload -d tpcc base.ctl -o SKIP=1000000 -o LIMIT=100000
 ```
 TYPE   = FIXED
 STRIDE = 100
-COL    = id      INTEGER
-COL    = name    VARCHAR NULLIF ','
-COL    = amount  DOUBLE
+COL    = INTEGER          -- 4 bytes: first field
+COL    = VARCHAR NULLIF ','   -- text, ends at the separator
+COL    = DOUBLE           -- 8 bytes
 ```
 
 - Records are exactly `STRIDE` bytes; fields follow the `COL` declaration order;
@@ -553,7 +553,7 @@ PARALLEL_WORKERS = 8      # optional
 
 | # | Condition | INFO line shape |
 |---|---|---|
-| 1 | effective workers ≤ 1 | `PARALLEL disabled (workers=1)` |
+| 1 | effective workers = 1 (`0` / negative / `>64` are rejected outright) | `PARALLEL disabled (workers=1)` |
 | 2 | `TYPE` is `TUPLE` / `FUNCTION` | `PARALLEL disabled (TYPE=...)` |
 | 3 | `FILTER` / `FORCE_NOT_NULL` given | `PARALLEL disabled (FILTER)` etc. |
 | 4 | target table has dropped columns | `PARALLEL disabled (dropped columns)` |
@@ -598,8 +598,9 @@ Therefore:
   rejected record: rows for a rejected line are already in flight in other workers, so "keep the rows
   read before the error" would depend on worker timing and could load a nondeterministic superset of
   what pg_bulkload loads;
-- When omitted, `PARSE_BADFILE` / `DUPLICATE_BADFILE` are derived from the `LOGFILE` basename and
-  live in the same directory.
+- When omitted, `PARSE_BADFILE` / `DUPLICATE_BADFILE` get the default basename
+  `$PGDATA/pg_fastload/<timestamp>_<db>_<nsp>_<tbl>` (they follow the *default* log name, not a
+  custom `LOGFILE`); pass them explicitly to control the location.
 
 ---
 
@@ -680,6 +681,10 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 ------+---------+-----------------+------------+----------+---------+-----------------+---------+------------+-------------
  4121 | tpcc    | public.lineitem | CSV        | parallel | running |            3.42 | 3687521 |  536870912 | 1073741824
 ```
+
+(The example above omits some columns for readability — `backend_start`, `started`, `direction` and
+`infile` also exist; the view has 20 columns in total, see §18.7 for a fuller example and the SQL
+definition for the authoritative list.)
 
 | Column | Meaning |
 |---|---|
@@ -776,7 +781,9 @@ Notes:
 | `INPUT option required` / `OUTPUT option required` | missing mandatory keyword | add it |
 | `unterminated CSV quoted field` | unbalanced quote | fix the data, or inspect with `PARALLEL=OFF` |
 | `invalid TYPE "XXX"` | unsupported type | use `CSV`/`BINARY`/`FIXED`/`TUPLE`/`FUNCTION` |
-| Table is empty after a "successful" load | `LIMIT=0`, `SKIP` beyond the file, or a concurrent truncate | check parameters and concurrency |
+| Table is empty after a "successful" load | `LIMIT=0`, or a concurrent truncate (a `SKIP` past end-of-file is an **error**, not an empty load) | check parameters and concurrency |
+| `could not skip N lines in the input file` | `SKIP` is greater than the number of physical lines in the input | lower `SKIP`, or check the file's line endings |
+| `could not resize shared memory segment "...": No space left on device` | `/dev/shm` exhausted — leaked DSM segments (e.g. after a `SIGKILL`ed backend) or too many workers | lower `PARALLEL_WORKERS`, enlarge `/dev/shm`, or restart the instance |
 | Table unusable after a crashed `DIRECT` load | data files written but never committed; LSF left behind | `pg_fastload -r -D $PGDATA` (cleans up per the LSF record and removes the status file) |
 | Load reported success but the application sees no rows | `WRITER=PARALLEL`'s separate transaction, or the caller did not `COMMIT` | check the transaction boundaries |
 
@@ -789,16 +796,14 @@ Notes:
 3. The parallel path assumes input encoding = database encoding.
 4. `TUPLE` / `FUNCTION` are not parallelised.
 5. Fixed-length parallel: `NULLIF` patterns ≤ 64 bytes; records must be whole `STRIDE`.
-6. Record size cap: 256 MiB.
+6. Record size cap: 256 MiB on the parallel path (the serial path is bounded only by memory; a
+   17 MiB single-line record is verified to load).
 7. Requires `max_worker_processes ≥ PARALLEL_WORKERS + 1`.
 8. `WRITER=PARALLEL` uses a separate transaction (upstream behaviour) and is not atomic with the caller.
-9. Fully verified only on PostgreSQL 18.6 / x86_64 Linux.
+9. Release binaries are fully verified on PostgreSQL 18.6 / x86_64 Linux; the source tree also
+   builds clean on 15.19 / 16.15 / 17.11 / 18.6 / 19rc1 (CI matrix).
 10. During a parallel load the target table holds an `AccessExclusiveLock`, excluding any concurrent access.
-11. Export ([§18](#18-exporting-table-data-pg_fastload_export)) runs single-process serially; `PARALLEL`
-    has no effect on it. The bottleneck is the CPU of that one backend (1 of 16 cores), and the file
-    write is only ~4% of the time — see
-    [BENCHMARK §8](BENCHMARK.md#8-export-throughput-pg_fastload_export-vs-copy-to).
-12. A fixed-width export pads every field: reloading a text column as `CHAR(n)` loses trailing blanks, as
+11. A fixed-width export pads every field: reloading a text column as `CHAR(n)` loses trailing blanks, as
     `VARCHAR(n)` keeps the padding — neither is an exact round trip (see [§18.5](#185-round-trip-semantics-read-this-section)).
 
 ---
@@ -971,7 +976,10 @@ SELECT pgfastload.pg_fastload_export(ARRAY[
 `OUT_COL=INTEGER` is rejected (`TYPE=FIXED writes text only`). Use `BINARY` for native numeric
 fields.
 
-The export also writes a sample control file at `<OUTPUT>.ctl`, ready to be edited:
+The export also writes a sample control file at `<OUTPUT>.ctl`, ready to be edited (BINARY / FIXED
+exports only — a CSV export writes no sample). Like the output file itself, the sample is created
+with `O_EXCL` and never overwritten: a stale `<OUTPUT>.ctl` from a previous export makes the new
+export fail with `File exists` until you remove it.
 
 ```ini
 INPUT = /data/lineitem.bin
