@@ -2,6 +2,7 @@
  * pg_fastload: include/pg_strutil.h
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 #ifndef STRUTIL_H_INCLUDED
 #define STRUTIL_H_INCLUDED

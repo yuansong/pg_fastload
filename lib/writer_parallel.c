@@ -2,6 +2,7 @@
  * pg_fastload: lib/writer_parallel.c
  *
  *	  Copyright (c) 2009-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 #include "postgres.h"

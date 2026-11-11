@@ -2,6 +2,7 @@
  * pg_fastload: lib/binary.c
  *
  *	  Copyright (c) 2011-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 /**

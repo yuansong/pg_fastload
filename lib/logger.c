@@ -2,6 +2,7 @@
  * pg_fastload: lib/logger.c
  *
  *	  Copyright (c) 2007-2026, NTT, Inc.
+ *	  Portions Copyright (c) 2026, yuanyuansong
  */
 
 #include "pg_fastload.h"

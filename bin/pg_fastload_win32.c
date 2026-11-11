@@ -1,3 +1,9 @@
+/*
+ * pg_fastload: bin/pg_fastload_win32.c
+ *
+ *	  Copyright (c) 2008-2026, NTT, Inc.
+ *	  (renamed from bin/pg_bulkload_win32.c; contents unchanged)
+ */
 int pgwin32_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timeval * timeout);
 
 static char *
