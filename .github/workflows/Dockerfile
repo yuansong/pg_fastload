@@ -31,23 +31,26 @@ ENV PGDATA=/var/lib/pgsql/${PG_VERSION}/data
 
 # Install packages for build
 RUN sed -i -e '/^mirrorlist=/s/^/#/' -e '/^#baseurl=/s/^#//' /etc/yum.repos.d/*.repo && \
-    dnf update -y && \
-    dnf install -y \
-        clang gcc git krb5-devel libselinux-devel libzstd-devel lz4-devel make \
+    dnf -y --setopt=retries=5 update && \
+    dnf -y --setopt=retries=5 install \
+        clang clang-devel gcc git krb5-devel libselinux-devel libzstd-devel lz4-devel make \
         openssl-devel pam-devel readline-devel rpmdevtools zlib-devel \
         numactl-devel
 
+# CodeReady Builder carries the LLVM bits PostgreSQL's bitcode build needs.  It
+# was called powertools before 8.10, and the old name is gone on current Rocky 8
+# images, so enable whichever one this release actually has.
+RUN (dnf -y install 'dnf-command(config-manager)' || true) && \
+    (dnf config-manager --set-enabled crb || \
+     dnf config-manager --set-enabled powertools || true)
+
 # Install PostgreSQL
-RUN if [ "${RHEL_VERSION}" = "8" ]; then \
-        dnf install -y --enablerepo=powertools perl-IPC-Run; \
-    else \
-        dnf install -y --enablerepo=crb perl-IPC-Run; \
-    fi
-RUN dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+RUN dnf -y --setopt=retries=5 install \
+        https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 RUN if [ "${RHEL_VERSION}" = "8" ] || [ "${RHEL_VERSION}" = "9" ]; then \
         dnf -qy module disable postgresql; \
     fi
-RUN dnf install -y \
+RUN dnf -y --setopt=retries=5 install \
         postgresql${PG_VERSION}-server \
         postgresql${PG_VERSION}-devel \
         postgresql${PG_VERSION}-llvmjit

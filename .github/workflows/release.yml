@@ -144,6 +144,12 @@ jobs:
               tail -n 120 /tmp/docker-build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # The summary renders on the job page, which needs a browser login;
+            # annotations are readable from the public API, so the error lines
+            # go there too.
+            grep -inE 'error|not found|no match|cannot|problem|failed' /tmp/docker-build.log \
+              | tail -n 10 | sed 's/%/%25/g' \
+              | while IFS= read -r line; do echo "::error::$line"; done
             exit "$rc"
           fi
           container_id=$(docker create pg_fastload)
