@@ -409,7 +409,34 @@ Load-side suites are unaffected by all of this: CSV 90/90 and fixed-length 44/44
 Regressions after the change: `fastload_verify.py` **90/90**, `fastload_verify_fixed.py`
 **44/44**; build rc=0, zero warnings in added code.
 
-## 14. Conclusion
+## 14. Continuous Integration Verification (2026-11-17)
+
+`.github/workflows/test.yml` builds PostgreSQL 15.15, 16.11, 17.7 and 18.1 from source with
+`--enable-cassert`, installs the extension and runs the ten-case `pg_regress` suite in `bin/`.
+Run [#20](https://github.com/yuansong/pg_fastload/actions/runs/44095175255) at `c75e860` is the
+first fully green run: **4/4 jobs, 10/10 tests per job**; `Build with Ubuntu packages` is green on
+the same commit.
+
+Getting there fixed one shipped crash and three harness defects, described in
+[CHANGES.md](CHANGES.md) §25:
+
+- **`get_relation_name(InvalidOid)`.** A `WRITER = BINARY` load has no target relation, so the
+  progress record dereferenced `get_rel_name()`'s NULL through `quote_identifier()`. Every
+  `WRITER = BINARY` load killed the backend, and the crash-restart made the client report only
+  `server closed the connection unexpectedly`. Fixed in `lib/writer.c`.
+- **PostgreSQL 14 in the matrix.** `include/pg_fastload.h` rejects anything below 15 with
+  `#error`, so that job could only ever fail.
+- **`| tee` without `pipefail`.** A compile error was reported as tee's exit status, and
+  `fail-fast` (the default) then cancelled the remaining majors — one real failure looked like
+  four.
+- **`bin/sql` ignored wholesale.** 19 regression `.sql` sources were never committed and CI died
+  at `cp: cannot stat 'sql/init-extension-v3.sql'`.
+
+The suite is now the regression gate for the file-output writers too: `write_bin` covers
+`WRITER = BINARY` end to end, which is exactly the path the segfault lived in and which the
+VM-side verification scripts above never exercised.
+
+## 15. Conclusion
 
 The current version meets the delivery criteria across nine dimensions: functional correctness (CSV 90/90, fixed-width 44/44, `MULTI_PROCESS` combination 8/8, export 39/39, parallel export 33/33 on each of five majors), upstream parity (225 differential comparisons against pg_bulkload 3.1.23 with 0 mismatches), load progress (8/8 view checks on five majors, exact final numbers, no measurable cost), export (CSV/BINARY/FIXED with CSV byte-identical to `COPY` on the serial path; 9.60× parallel scaling), build (release + debug both rc=0 with zero warnings in added code), performance (CSV ~4.5× over serial, fixed-width 1.82×), memory lifecycle (all palloc, no malloc-family symbols), multi-version compatibility (PG 15/16/17/19 all PASS), and copyright compliance (retained original copyright + explicit attribution and non-endorsement).
 

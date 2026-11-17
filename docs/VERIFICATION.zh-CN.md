@@ -396,7 +396,28 @@ PG 18.6 上 `verify_skipindex_export.py` **20/20 PASS**：
 改动后回归：`fastload_verify.py` **90/90**、`fastload_verify_fixed.py` **44/44**；
 构建 rc=0、新增代码零警告。
 
-## 14. 结论
+## 14. CI 验证（2026-11-17）
+
+`.github/workflows/test.yml` 用 `--enable-cassert` 从源码构建 PostgreSQL 15.15 / 16.11 / 17.7 / 18.1，
+安装扩展后跑 `bin/` 下十项 `pg_regress` 用例。
+Run [#20](https://github.com/yuansong/pg_fastload/actions/runs/44095175255)（`c75e860`）是首次全绿：
+**4/4 job、每 job 10/10 用例**；同一提交的 `Build with Ubuntu packages` 也是绿的。
+
+走到这一步修掉了 1 个已发布的崩溃和 3 个测试/CI 缺陷，详见 [CHANGES.zh-CN.md](CHANGES.zh-CN.md) §25：
+
+- **`get_relation_name(InvalidOid)`**：`WRITER = BINARY` 写文件没有目标表，进度记录把
+  `get_rel_name()` 的 NULL 送进 `quote_identifier()`。每次 `WRITER = BINARY` 装载都打死后端，
+  崩溃重启让客户端只看到 `server closed the connection unexpectedly`。已在 `lib/writer.c` 修复。
+- **矩阵里还留着 PostgreSQL 14**：`include/pg_fastload.h` 对 < 15 直接 `#error`，该 job 只能失败。
+- **`| tee` 没配 `pipefail`**：编译错误被当成 tee 的退出码放过，再叠加默认的 `fail-fast`，
+  一个真实失败看起来像四个。
+- **`bin/sql` 被整目录忽略**：19 个回归 `.sql` 源文件从未入库，CI 死在
+  `cp: cannot stat 'sql/init-extension-v3.sql'`。
+
+现在这套用例也是文件输出 writer 的回归门槛：`write_bin` 端到端覆盖 `WRITER = BINARY`——
+正是崩溃所在、而上面那些 VM 侧验证脚本从未覆盖的路径。
+
+## 15. 结论
 
 当前版本在功能正确性（CSV 90/90、定长 44/44、`MULTI_PROCESS` 组合 8/8、导出 39/39、并行导出五个
 大版本各 33/33）、上游等价性（与 pg_bulkload 3.1.23 的 225 次差分比对 0 mismatch）、加载进度
