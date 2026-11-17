@@ -40,7 +40,11 @@ jobs:
           - "15.15"
 
     env:
-      CACHE_VERSION: 20251204  # to identify cache version
+      # Bump this to rebuild PostgreSQL instead of restoring ~/pgsql/<ver>.
+      # The cached tree is a compiled install, so it has to match the runner
+      # image: when GitHub rolls a new ubuntu-latest the old binaries can stop
+      # running and every job fails within seconds, before any log is written.
+      CACHE_VERSION: 20261117  # to identify cache version
 
     steps:
     - uses: actions/checkout@v4
@@ -178,6 +182,39 @@ jobs:
         if [ -f "$DIFF" ]; then
           echo "::error::$(sed -n '1,60p' "$DIFF" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
         fi
+
+        # When a step before installcheck fails there is no installcheck log and
+        # no diff, so the only witness is the make log.  Emit its error lines as
+        # an annotation (short enough to survive) and the rest to the summary.
+        MK=~/make.log
+        PGCONF=~/pgsql/${{ env.PGVERSION }}/bin/pg_config
+        {
+          echo "### PostgreSQL ${{ env.PGVERSION }} environment"
+          echo '```'
+          echo "PGVERSION=${{ env.PGVERSION }}"
+          echo "pg_config: $PGCONF"
+          if [ -x "$PGCONF" ]; then "$PGCONF" --version || echo "(pg_config failed to run)"; else echo "(missing or not executable)"; fi
+          ls ~/pgdata 2>/dev/null || echo "(no ~/pgdata)"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ -f "$MK" ]; then
+          {
+            echo "### PostgreSQL ${{ env.PGVERSION }} make log (errors)"
+            echo '```'
+            grep -nE "error:|Error [0-9]|\*\*\*|undefined reference|No such file" "$MK" | tail -40 || echo "(no error lines)"
+            echo '```'
+            echo "### PostgreSQL ${{ env.PGVERSION }} make log (tail)"
+            echo '```'
+            tail -30 "$MK"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Keep this under roughly a thousand characters: a workflow command is
+          # one line and GitHub truncates long ones.
+          echo "::error::$(grep -E "error:|Error [0-9]|\*\*\*|undefined reference|No such file" "$MK" | tail -8 | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
+        fi
+
         # A crashed backend leaves the reason only in the server log, and the
         # job log is not readable without admin rights.  The tail goes into the
         # run summary, where newlines survive; the annotation carries only the
