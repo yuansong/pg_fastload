@@ -141,15 +141,17 @@ jobs:
             {
               echo "### pg${{ matrix.PG_VERSION }} / rhel${{ matrix.RHEL_VERSION }}: docker build failed (rc=$rc)"
               echo '```'
-              tail -n 120 /tmp/docker-build.log
+              tail -n 160 /tmp/docker-build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             # The summary renders on the job page, which needs a browser login;
-            # annotations are readable from the public API, so the error lines
-            # go there too.
-            grep -inE 'error|not found|no match|cannot|problem|failed' /tmp/docker-build.log \
-              | tail -n 10 | sed 's/%/%25/g' \
-              | while IFS= read -r line; do echo "::error::$line"; done
+            # annotations are readable from the public API, so the interesting
+            # lines go there too.  One annotation, because GitHub keeps only a
+            # handful per step.
+            msg=$(grep -inE 'not ok|regression|diff|error|fatal|panic|failed|cannot|no match|no space' \
+                    /tmp/docker-build.log | tail -n 40 \
+                    | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')
+            echo "::error::${msg}"
             exit "$rc"
           fi
           container_id=$(docker create pg_fastload)

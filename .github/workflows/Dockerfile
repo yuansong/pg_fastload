@@ -96,6 +96,17 @@ RUN mkdir -p /var/lib/pgsql/check && \
     tar -xzf /var/lib/pgsql/rpmbuild/SOURCES/pg_fastload-${PG_FASTLOAD_VERSION}.tar.gz \
         -C /var/lib/pgsql/check --strip-components=1 && \
     cd /var/lib/pgsql/check && \
+    echo "cores: $(nproc)"; df -h /dev/shm | tail -n 1; \
     initdb --no-locale -E UTF8 && \
     pg_ctl -w start -l /var/lib/pgsql/check/server.log && \
-    make USE_PGXS=1 installcheck
+    ( make USE_PGXS=1 installcheck > /tmp/check.log 2>&1; echo $? > /tmp/check.rc ); \
+    rc=$(cat /tmp/check.rc); \
+    if [ "$rc" -ne 0 ]; then \
+        echo "=== installcheck failed (rc=$rc) ==="; \
+        grep -nE '^(ok|not ok|# )' /tmp/check.log | tail -n 20; \
+        echo '=== regression.diffs, first 120 lines ==='; \
+        sed -n '1,120p' bin/regression.diffs 2>/dev/null || true; \
+        echo '=== server.log, last 40 lines ==='; \
+        tail -n 40 /var/lib/pgsql/check/server.log 2>/dev/null || true; \
+    fi; \
+    test "$rc" -eq 0
