@@ -891,6 +891,10 @@ view publishes an empty `relname` for a file write (documented in §12.4).
   now name the generated files only.
 - Goldens: `PROGRESS`, `PROGRESS_NOTICE` and `PROGRESS_INTERVAL` added to 137 parameter blocks
   (`ReaderDumpParams()` prints them), and `write_bin` now expects the BINARY NULL message.
+- `CACHE_VERSION` bumped: the cached `~/pgsql/<version>` is a *compiled* installation, so it is
+  only usable on the runner image it was built on. Once that image rolled over, every job died
+  in about fourteen seconds inside `make install`, before any log worth publishing existed. The
+  publish step now also dumps `pg_config`, `~/pgdata` and the make log.
 
 ### 25.3 Verification
 

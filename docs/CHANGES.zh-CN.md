@@ -805,6 +805,10 @@ pinfo.relname = get_relation_name(wt->relid);
   `cp: cannot stat 'sql/init-extension-v3.sql'`；现在只列生成物。
 - 期望文件：137 个参数块补上 `PROGRESS`／`PROGRESS_NOTICE`／`PROGRESS_INTERVAL`
   （`ReaderDumpParams()` 会打印），`write_bin` 改为期望新的 BINARY NULL 消息。
+- `CACHE_VERSION` 已升版：缓存的 `~/pgsql/<version>` 是**编译好的**安装树，只在构建它的
+  那个 runner 镜像上可用。镜像一滚动，所有 job 都在 `make install` 里十四秒内死掉，
+  而且发生在任何值得看的日志产生之前。发布步骤现在会连带 dump `pg_config`、`~/pgdata`
+  和 make 日志。
 
 ### 25.3 验证
 
