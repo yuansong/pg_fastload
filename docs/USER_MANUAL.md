@@ -690,7 +690,7 @@ definition for the authoritative list.)
 |---|---|
 | `pid` | backend running the load |
 | `backend_start`, `started` | session start / load start |
-| `datname`, `relname`, `infile` | database, target table, input given to `INPUT` |
+| `datname`, `relname`, `infile` | database, target table, input given to `INPUT`. `relname` is empty when the load has no target table, that is when `WRITER = BINARY` writes a file |
 | `direction` | `load` or `export`: the same record also covers `pg_fastload_export()` (see [§18](#18-exporting-table-data-pg_fastload_export)) |
 | `input_type`, `mode` | resolved `TYPE` (`CSV`, `BINARY`, `FIXED`, …) and `serial` / `parallel` |
 | `state` | `running` while the backend is alive, `stale` for a record left by a killed backend |

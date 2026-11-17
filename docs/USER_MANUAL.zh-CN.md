@@ -671,7 +671,7 @@ SELECT * FROM pgfastload.pg_fastload_progress;
 |---|---|
 | `pid` | 正在装载的后端进程号 |
 | `backend_start`、`started` | 会话启动时间 / 装载开始时间 |
-| `datname`、`relname`、`infile` | 数据库、目标表、`INPUT` 指定的输入文件 |
+| `datname`、`relname`、`infile` | 数据库、目标表、`INPUT` 指定的输入文件。装载没有目标表时（`WRITER = BINARY` 写文件）`relname` 为空串 |
 | `direction` | `load` 或 `export`：同一条记录也可能来自 `pg_fastload_export()`（见 [§18](#18-导出表数据pg_fastload_export)） |
 | `input_type`、`mode` | 解析出的 `TYPE`（`CSV`、`BINARY`、`FIXED` 等）与 `serial`／`parallel` |
 | `state` | 后端存活时为 `running`；被 kill 的后端留下的记录为 `stale` |

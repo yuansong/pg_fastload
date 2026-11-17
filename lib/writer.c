@@ -122,11 +122,30 @@ WriterClose(Writer *self, bool onError)
 	return self->close(self, onError);
 }
 
+/*
+ * Qualified name of a relation, or NULL when there is none to name.
+ *
+ * Not every load has a target relation: WRITER = BINARY writes a file, and
+ * the progress record is published before the loader knows whether the OID
+ * it was handed still resolves.  quote_qualified_identifier() cannot take a
+ * NULL identifier (quote_identifier() reads ident[0]), so the empty cases
+ * have to be filtered out here rather than at each call site.
+ */
 char *
 get_relation_name(Oid relid)
 {
-	return quote_qualified_identifier(
-		get_namespace_name(get_rel_namespace(relid)),
-		get_rel_name(relid));
+	char	   *relname;
+	char	   *nspname;
+
+	if (!OidIsValid(relid))
+		return NULL;
+
+	relname = get_rel_name(relid);
+	if (relname == NULL)
+		return NULL;			/* relation dropped meanwhile */
+
+	nspname = get_namespace_name(get_rel_namespace(relid));
+
+	return quote_qualified_identifier(nspname, relname);
 }
 
