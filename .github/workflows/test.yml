@@ -179,9 +179,30 @@ jobs:
           echo "::error::$(sed -n '1,60p' "$DIFF" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
         fi
         # A crashed backend leaves the reason only in the server log, and the
-        # job log is not readable without admin rights.
+        # job log is not readable without admin rights.  The tail goes into the
+        # run summary, where newlines survive; the annotation carries only the
+        # crash markers, because a workflow command is a single long line and
+        # GitHub truncates it, which is how the first diagnosis of the
+        # write_bin crash lost the interesting part.
         SRV=~/pgdata/${{ env.PGVERSION }}/server.log
         if [ -f "$SRV" ]; then
-          echo "::error::$(tail -60 "$SRV" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
+          {
+            echo "### PostgreSQL ${{ env.PGVERSION }} server log (tail)"
+            echo '```'
+            tail -80 "$SRV"
+            echo '```'
+            echo "### PostgreSQL ${{ env.PGVERSION }} crash markers"
+            echo '```'
+            grep -nE "terminated by signal|server process|reinitializing|TRAP:|Assert|PANIC|was terminated|all server processes terminated" "$SRV" \
+              || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          MARKERS=$(grep -E "terminated by signal|TRAP:|PANIC|reinitializing" "$SRV" | tail -6)
+          if [ -n "$MARKERS" ]; then
+            echo "::error::$(printf '%s\n' "$MARKERS" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
+          fi
+        else
+          echo "::error::no server log at $SRV"
         fi
         exit 1
