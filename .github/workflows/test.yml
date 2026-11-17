@@ -118,7 +118,7 @@ jobs:
         echo "archive_mode = on" >> $PGDATA/postgresql.conf
         echo "archive_command = 'cp %p $ARCHIVEDIR/%f'" >> $PGDATA/postgresql.conf
         pg_ctl -V
-        pg_ctl -D $PGDATA start
+        pg_ctl -D $PGDATA -l $PGDATA/server.log start
 
     - name: show postgresql configuration
       shell: bash -xeo pipefail {0}
@@ -177,5 +177,11 @@ jobs:
         fi
         if [ -f "$DIFF" ]; then
           echo "::error::$(sed -n '1,60p' "$DIFF" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
+        fi
+        # A crashed backend leaves the reason only in the server log, and the
+        # job log is not readable without admin rights.
+        SRV=~/pgdata/${{ env.PGVERSION }}/server.log
+        if [ -f "$SRV" ]; then
+          echo "::error::$(tail -60 "$SRV" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
         fi
         exit 1
