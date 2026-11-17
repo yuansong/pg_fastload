@@ -776,5 +776,42 @@ DIRECT 装载通过 spool 批量构建维护索引，在带索引表上代价约
 
 ---
 
+## 25. CI 首次全绿：修复 `WRITER = BINARY` 段错误（2026-11-17）
+
+回归套件在 GitHub 上一直没绿过。把它查清的过程中，挖出了一个随 1.0.0 进度视图一起发布的真实崩溃。
+
+### 25.1 Bug 修复：给不存在的关系取名字会打死后端
+
+写文件的装载（`WRITER = BINARY`）没有目标表，`wt->relid` 是 `InvalidOid`。进度记录仍然执行
+
+```
+pinfo.relname = get_relation_name(wt->relid);
+```
+
+把 `get_rel_name()` 返回的 NULL 传进了 `quote_qualified_identifier()` → `quote_identifier()`，
+而后者会读 `ident[0]`。于是**每一次** `WRITER = BINARY` 装载都以 SIGSEGV 结束；后端崩溃会
+连带整个集群重启，客户端只能看到
+`ERROR: query failed: server closed the connection unexpectedly`。
+现在 `get_relation_name()` 对 `InvalidOid` 和"期间被 DROP 掉的关系"都返回 NULL，
+写文件时进度视图的 `relname` 为空串（已在 §12.4 写明）。
+
+### 25.2 测试与 CI 修复
+
+- `test.yml`：矩阵去掉 PostgreSQL 14（头文件对 < 15 直接 `#error`）、`fail-fast: false`、
+  所有 `| tee` 的步骤改用 `bash -xeo pipefail`（编译失败曾被当成 tee 的退出码放过）、
+  `actions/checkout@v4`；失败诊断改为把 server log 写进 `$GITHUB_STEP_SUMMARY`
+  （annotation 是单行，GitHub 会截断，正好截在崩溃日志之前）。
+- `.gitignore` 曾把 `bin/sql` 整目录忽略，19 个回归 `.sql` 源文件从未入库，CI 报
+  `cp: cannot stat 'sql/init-extension-v3.sql'`；现在只列生成物。
+- 期望文件：137 个参数块补上 `PROGRESS`／`PROGRESS_NOTICE`／`PROGRESS_INTERVAL`
+  （`ReaderDumpParams()` 会打印），`write_bin` 改为期望新的 BINARY NULL 消息。
+
+### 25.3 验证
+
+`Test` 在 PG 15.15 / 16.11 / 17.7 / 18.1（均以 `--enable-cassert` 构建）：**4/4 全绿**，
+每个 job 回归 10/10。`Build with Ubuntu packages`：全绿。
+
+---
+
 *未采纳方案汇总见 [OPTIMIZATION.zh-CN.md](OPTIMIZATION.zh-CN.md#八未采纳方案汇总)；性能数据见
 [BENCHMARK.md](BENCHMARK.md)；验证结论见 [VERIFICATION.md](VERIFICATION.md)。*

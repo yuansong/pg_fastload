@@ -858,5 +858,46 @@ fix: `if (skip_index_opt && (*wt)->max_dup_errors > 0)`.
 
 ---
 
+## 25. First green CI: `WRITER = BINARY` segfault fixed (2026-11-17)
+
+The regression suite had never been green on GitHub, and untangling it turned up a real crash
+that shipped with the progress view in 1.0.0.
+
+### 25.1 Bug fix: naming a missing relation crashed the backend
+
+A load that writes a file (`WRITER = BINARY`) has no target relation, so `wt->relid` is
+`InvalidOid`. The progress record was still filled in with
+
+```
+pinfo.relname = get_relation_name(wt->relid);
+```
+
+which handed `get_rel_name()`'s NULL to `quote_qualified_identifier()` → `quote_identifier()`,
+and that function reads `ident[0]`. Every `WRITER = BINARY` load died with SIGSEGV; because a
+backend crash takes the whole cluster down, the client only ever saw
+`ERROR: query failed: server closed the connection unexpectedly`. `get_relation_name()` now
+returns NULL for `InvalidOid` and for a relation that has been dropped in the meantime, and the
+view publishes an empty `relname` for a file write (documented in §12.4).
+
+### 25.2 Test and CI repairs
+
+- `test.yml`: PostgreSQL 14 removed from the matrix (the header rejects anything below 15 with
+  `#error`), `fail-fast: false`, `bash -xeo pipefail` on every step that pipes into `tee` (a
+  build failure was reported as tee's exit status), `actions/checkout@v4`, and failure
+  diagnostics that publish the server log through `$GITHUB_STEP_SUMMARY` — an annotation is one
+  long line and GitHub truncates it exactly where the crash is logged.
+- `.gitignore` ignored `bin/sql` as a directory, so 19 regression `.sql` sources were never
+  committed and CI failed with `cp: cannot stat 'sql/init-extension-v3.sql'`. The ignore rules
+  now name the generated files only.
+- Goldens: `PROGRESS`, `PROGRESS_NOTICE` and `PROGRESS_INTERVAL` added to 137 parameter blocks
+  (`ReaderDumpParams()` prints them), and `write_bin` now expects the BINARY NULL message.
+
+### 25.3 Verification
+
+`Test` on PG 15.15 / 16.11 / 17.7 / 18.1 (all built with `--enable-cassert`): **4/4 jobs green**,
+10/10 regression tests per job. `Build with Ubuntu packages`: green.
+
+---
+
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*
 
