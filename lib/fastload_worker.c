@@ -659,6 +659,7 @@ fl_consume_input(FastloadWorkerCtx *ctx)
 	}
 
 done:
+	;						/* a label may not end a block before C23 */
 
 #ifdef ENABLE_FASTLOAD_PROFILE
 	INSTR_TIME_SET_CURRENT(t_end);
