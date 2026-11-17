@@ -41,9 +41,10 @@ jobs:
 
     env:
       # Bump this to rebuild PostgreSQL instead of restoring ~/pgsql/<ver>.
-      # The cached tree is a compiled install, so it has to match the runner
-      # image: when GitHub rolls a new ubuntu-latest the old binaries can stop
-      # running and every job fails within seconds, before any log is written.
+      # The cached tree is a compiled install built on the runner image of its
+      # time; rebuilding is the only way to be sure it matches the current one.
+      # It is not a substitute for the apt step above, which has to run either
+      # way because the extension links against the system libraries.
       CACHE_VERSION: 20261117  # to identify cache version
 
     steps:
@@ -69,6 +70,17 @@ jobs:
       run: |
         echo "PGVERSION=${{ matrix.PGVERSION }}" >> $GITHUB_ENV
 
+    - name: install build dependencies
+      shell: bash -xeo pipefail {0}
+      run: |
+        # This runs whether or not the PostgreSQL build comes from the cache,
+        # and it has to: pg_config --libs reports the libraries PostgreSQL was
+        # configured with (libedit, zlib, ...), and the client program links
+        # against them.  Installing these only on a cache miss is what made
+        # every cached run fail in seconds with "cannot find -ledit".
+        sudo apt-get update -qq
+        sudo apt-get -y install bc libpam-dev libedit-dev
+
     - name: cache builded resources
       id: cache-postgresql-core
       uses: actions/cache@v4
@@ -84,8 +96,6 @@ jobs:
         export PGHOME=~/pgsql/${{ env.PGVERSION }}
 
         # install
-        sudo apt-get update -qq
-        sudo apt-get -y install bc libpam-dev libedit-dev
         wget -q https://ftp.postgresql.org/pub/source/v${{ env.PGVERSION }}/postgresql-${{ env.PGVERSION }}.tar.gz
         tar xzf postgresql-${{ env.PGVERSION }}.tar.gz
 

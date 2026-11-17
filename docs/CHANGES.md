@@ -891,10 +891,14 @@ view publishes an empty `relname` for a file write (documented in §12.4).
   now name the generated files only.
 - Goldens: `PROGRESS`, `PROGRESS_NOTICE` and `PROGRESS_INTERVAL` added to 137 parameter blocks
   (`ReaderDumpParams()` prints them), and `write_bin` now expects the BINARY NULL message.
-- `CACHE_VERSION` bumped: the cached `~/pgsql/<version>` is a *compiled* installation, so it is
-  only usable on the runner image it was built on. Once that image rolled over, every job died
-  in about fourteen seconds inside `make install`, before any log worth publishing existed. The
-  publish step now also dumps `pg_config`, `~/pgdata` and the make log.
+- **`libedit-dev` was only installed on a cache miss.** The `apt-get install bc libpam-dev
+  libedit-dev` lived inside the `if: cache-hit != true` PostgreSQL build, so any run that
+  restored the cache skipped it and then died at the client link with
+  `/usr/bin/ld: cannot find -ledit` — `pg_config --libs` names the libraries PostgreSQL was
+  configured with, and the extension does not carry its own copy of them. Dependencies now have
+  their own step that always runs. Finding this needed one more change: a failure that early
+  produces neither an installcheck log nor a regression diff, so the publish step now also dumps
+  `pg_config`, `~/pgdata` and the make log.
 
 ### 25.3 Verification
 

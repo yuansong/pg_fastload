@@ -805,10 +805,13 @@ pinfo.relname = get_relation_name(wt->relid);
   `cp: cannot stat 'sql/init-extension-v3.sql'`；现在只列生成物。
 - 期望文件：137 个参数块补上 `PROGRESS`／`PROGRESS_NOTICE`／`PROGRESS_INTERVAL`
   （`ReaderDumpParams()` 会打印），`write_bin` 改为期望新的 BINARY NULL 消息。
-- `CACHE_VERSION` 已升版：缓存的 `~/pgsql/<version>` 是**编译好的**安装树，只在构建它的
-  那个 runner 镜像上可用。镜像一滚动，所有 job 都在 `make install` 里十四秒内死掉，
-  而且发生在任何值得看的日志产生之前。发布步骤现在会连带 dump `pg_config`、`~/pgdata`
-  和 make 日志。
+- **`libedit-dev` 只在缓存未命中时才装。** 那句 `apt-get install bc libpam-dev libedit-dev`
+  写在 `if: cache-hit != true` 的 PostgreSQL 构建步骤里，于是任何命中缓存的运行都跳过它，
+  然后在链接客户端时死在 `/usr/bin/ld: cannot find -ledit`——`pg_config --libs` 报的是
+  PostgreSQL 当年 configure 时用的库，扩展自己并不带这些库。现在依赖安装是独立的一步，
+  无条件执行。能定位到这一层还靠另一处改动：这么早的失败既没有 installcheck 日志、
+  也没有 regression diff 可发布，所以发布步骤现在连 `pg_config`、`~/pgdata` 和 make 日志
+  一起 dump。
 
 ### 25.3 验证
 
