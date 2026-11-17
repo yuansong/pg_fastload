@@ -148,21 +148,34 @@ jobs:
       run: |
         export PGHOME=~/pgsql/${{ env.PGVERSION }}
         export PATH=$PGHOME/bin:$PATH:
-        make installcheck
+        make installcheck 2>&1 | tee ~/installcheck.log
 
     - name: publish the regression diff on failure
       if: failure()
       shell: bash -xeo pipefail {0}
       run: |
-        # The job log is not readable without repository admin rights, so put
-        # the diff in the run summary as well; it is the only channel that
-        # stays visible to whoever opens the run page.
+        # The job log needs repository admin rights to read, so the diagnostic
+        # is published twice through channels that stay readable:
+        #   * the run summary (rendered on the run page), and
+        #   * workflow-command annotations, which the check-runs API exposes.
+        # The second one is what makes a red CI debuggable from a script.
         DIFF=bin/regression.diffs
+        LOG=~/installcheck.log
+
         {
-          echo "### regression diff (PostgreSQL ${{ env.PGVERSION }})"
+          echo "### PostgreSQL ${{ env.PGVERSION }}"
           echo '```'
+          if [ -f "$LOG" ]; then tail -25 "$LOG"; else echo "(no installcheck log)"; fi
+          echo '```'
+          echo '```diff'
           if [ -f "$DIFF" ]; then sed -n '1,200p' "$DIFF"; else echo "(no $DIFF produced)"; fi
           echo '```'
         } >> "$GITHUB_STEP_SUMMARY"
-        if [ -f "$DIFF" ]; then sed -n '1,200p' "$DIFF"; fi
+
+        if [ -f "$LOG" ]; then
+          echo "::error::$(tail -20 "$LOG" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
+        fi
+        if [ -f "$DIFF" ]; then
+          echo "::error::$(sed -n '1,60p' "$DIFF" | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
+        fi
         exit 1
