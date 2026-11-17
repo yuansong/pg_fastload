@@ -818,6 +818,29 @@ pinfo.relname = get_relation_name(wt->relid);
 `Test` 在 PG 15.15 / 16.11 / 17.7 / 18.1（均以 `--enable-cassert` 构建）：**4/4 全绿**，
 每个 job 回归 10/10。`Build with Ubuntu packages`：全绿。
 
+## 26. 二进制发行物（2026-11-17）
+
+发布不再只给一个标签，而是给出 `dnf` 能直接装的东西。`release.yml` 在原有的版本对账之外新增两个 job。
+
+- `source` 发布 `pg_fastload-<version>.tar.gz`（标签的 git archive，前缀
+  `pg_fastload-<version>/`）及其 `.sha256`。它与 `rpmbuild` 用的那个 tarball 逐字节相同，
+  所以照发布页重新构建，用的和二进制是同一棵树。
+- `rpms` 为每组（PostgreSQL 主版本 × RHEL 主版本）构建一个包——15/16/17/18 × 8/9/10 共 12 个，
+  命名沿用 pg_bulkload 的风格，如 `pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm`。矩阵中每一项都在
+  `rockylinux:<rhel>` 里装 pgdg 的 `postgresql<major>-devel`，跑
+  `rpmbuild -bb --define="dist .pg<major>.rhel<rhel>"`，然后**把刚打出来的包装上**再跑
+  `make installcheck`。包不可用则镜像构建失败，也就不会被上传。
+- `SPECS/pg_fastload-pg{15,16,17,18}.spec` 里还写着 `Version: 3.1.23`（`rpmbuild` 会去找一个
+  并不存在的 tarball）、指向上游站点、带着 pg_bulkload 的 changelog。现在版本是 1.0.0，
+  URL 指向本仓库，并注明发布 tarball 的位置。`SPECS/pg_fastload-pg14.spec` 已删除——
+  `include/pg_fastload.h` 对 < 15 直接 `#error`。
+- `.github/workflows/Dockerfile` 改为按 `GIT_REF`（标签）取源码而不是默认分支，回归测试也在
+  解包出来的 tarball 里跑而不是在 clone 里跑，所以被测的树就是包里的树。
+
+`RPM packages (manual)` 保留，用于单独试某一组组合（`workflow_dispatch`），
+这样调打包时不必动标签。
+
+
 ---
 
 *未采纳方案汇总见 [OPTIMIZATION.zh-CN.md](OPTIMIZATION.zh-CN.md#八未采纳方案汇总)；性能数据见

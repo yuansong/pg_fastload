@@ -86,6 +86,16 @@ the result of any `SELECT` to a CSV / BINARY / FIXED file, using the same Writer
 
 ### 2.2 Build and install (PGXS)
 
+**Binary packages.** Each release also publishes one RPM per (PostgreSQL major, RHEL major)
+pair — `pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm` for PostgreSQL 18 on RHEL 9, and likewise
+for 15 / 16 / 17 / 18 × RHEL 8 / 9 / 10. They are built from the tag inside the target
+distribution, and each one runs `make installcheck` against the installed package before it is
+uploaded, so an RPM that exists has passed the suite on its own platform. When one matches your
+server, `sudo dnf install ./pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm` is the whole install, and
+the rest of this section is unnecessary.
+
+From source:
+
 ```bash
 tar xzf pg_fastload-1.0.0.tar.gz
 cd pg_fastload

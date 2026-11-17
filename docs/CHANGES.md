@@ -905,6 +905,33 @@ view publishes an empty `relname` for a file write (documented in §12.4).
 `Test` on PG 15.15 / 16.11 / 17.7 / 18.1 (all built with `--enable-cassert`): **4/4 jobs green**,
 10/10 regression tests per job. `Build with Ubuntu packages`: green.
 
+## 26. Binary release assets (2026-11-17)
+
+A release now ships what a `dnf` user can install, not only a tag.  `release.yml` gained two jobs
+next to the notes check.
+
+- `source` publishes `pg_fastload-<version>.tar.gz` (git archive of the tag, prefix
+  `pg_fastload-<version>/`) together with its `.sha256`.  This is byte for byte the tarball
+  `rpmbuild` consumed, so rebuilding from the release page uses the same tree as the binaries.
+- `rpms` builds one package per (PostgreSQL major, RHEL major) pair -- 15/16/17/18 x 8/9/10,
+  twelve in total, named `pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm` the way pg_bulkload names
+  its own.  Each matrix entry builds inside `rockylinux:<rhel>`, installs the pgdg
+  `postgresql<major>-devel` packages, runs
+  `rpmbuild -bb --define="dist .pg<major>.rhel<rhel>"`, then installs the RPM it just produced and
+  runs `make installcheck` against that installation.  The image fails if the package is
+  unusable, and nothing is uploaded in that case.
+- `SPECS/pg_fastload-pg{15,16,17,18}.spec` still said `Version: 3.1.23` (so `rpmbuild` looked for
+  a tarball that does not exist), pointed at the upstream site and carried pg_bulkload's
+  changelog.  They now say 1.0.0, point at this repository and document where the release tarball
+  lives.  `SPECS/pg_fastload-pg14.spec` is gone: `include/pg_fastload.h` rejects PostgreSQL < 15.
+- `.github/workflows/Dockerfile` archives `GIT_REF` (the tag) instead of the default branch, and
+  the regression suite runs in the extracted tarball instead of in the clone, so the tree under
+  test is the tree inside the package.
+
+`RPM packages (manual)` stays for a single combination (`workflow_dispatch`), which is how a
+packaging change is tried without moving the tag.
+
+
 ---
 
 *A summary of rejected approaches is in [OPTIMIZATION.md](OPTIMIZATION.md#8-summary-of-rejected-approaches); performance data is in [BENCHMARK.md](BENCHMARK.md); verification conclusions are in [VERIFICATION.md](VERIFICATION.md).*

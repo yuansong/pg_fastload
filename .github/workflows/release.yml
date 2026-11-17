@@ -2,10 +2,20 @@ name: Release
 
 # A version tag (v1.2.3) publishes a GitHub release.  The body is
 # RELEASE_NOTES_<tag>.md, which lives in the repository next to the code it
-# describes, and the tag is checked against include/common.h — so the version,
+# describes, and the tag is checked against include/common.h -- so the version,
 # the notes and the documentation cannot drift apart.
 #
-# Re-pushing a tag updates the existing release instead of failing.
+# The release carries the same three things pg_bulkload publishes for a version:
+#   * a source tarball, pg_fastload-<version>.tar.gz, which is exactly the tree
+#     rpmbuild consumed (git archive of the tag, prefix pg_fastload-<version>/);
+#   * one binary RPM per (PostgreSQL major, RHEL major) pair, named
+#     pg_fastload-<version>-1.pg<nn>.rhel<m>.x86_64.rpm;
+#   * the notes themselves.
+# Every RPM is built inside its target distribution and must pass
+# `make installcheck` against the installed package before it is uploaded.
+#
+# Re-pushing a tag updates the existing release and replaces its assets instead
+# of failing.
 
 on:
   push:
@@ -22,6 +32,9 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,7 +46,6 @@ jobs:
           src=$(sed -n 's/.*PG_FASTLOAD_VERSION "\([0-9][0-9.]*\)".*/\1/p' include/common.h | head -n1)
           echo "tag=${tag}"     >> "$GITHUB_OUTPUT"
           echo "version=${ver}" >> "$GITHUB_OUTPUT"
-          echo "source=${src}"  >> "$GITHUB_OUTPUT"
           echo "tag: ${tag} / include/common.h: ${src}"
           if [ -z "${src}" ]; then
             echo "::error::could not read PG_FASTLOAD_VERSION from include/common.h"
@@ -49,7 +61,7 @@ jobs:
         run: |
           f="RELEASE_NOTES_${{ steps.ver.outputs.tag }}.md"
           if [ ! -f "$f" ]; then
-            echo "::error::$f is missing — the release body has to ship with the source"
+            echo "::error::$f is missing -- the release body has to ship with the source"
             ls -1 RELEASE_NOTES_*.md 2>/dev/null || true
             exit 1
           fi
@@ -77,3 +89,56 @@ jobs:
           else
             gh release create "$tag" --title "$title" --notes-file "$notes" --verify-tag
           fi
+
+  source:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the source tarball
+        run: |
+          ver="${{ needs.release.outputs.version }}"
+          git archive --format=tar.gz --prefix="pg_fastload-${ver}/" \
+            -o "pg_fastload-${ver}.tar.gz" "${{ github.sha }}"
+          sha256sum "pg_fastload-${ver}.tar.gz" > "pg_fastload-${ver}.tar.gz.sha256"
+          ls -l "pg_fastload-${ver}.tar.gz"*
+          echo "--- top of the archive ---"
+          tar -tzf "pg_fastload-${ver}.tar.gz" | head -n 5
+
+      - name: Attach the tarball to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" pg_fastload-*.tar.gz* --clobber
+
+  rpms:
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # pg_bulkload ships rhel8/9/10 for every supported major.  PostgreSQL 14
+      # is absent on purpose: include/pg_fastload.h refuses anything older than
+      # 15, so a pg14 package could not exist.
+      matrix:
+        RHEL_VERSION: ["8", "9", "10"]
+        PG_VERSION: ["15", "16", "17", "18"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the PostgreSQL ${{ matrix.PG_VERSION }} RPM for RHEL ${{ matrix.RHEL_VERSION }}
+        run: |
+          docker build .github/workflows/ -t pg_fastload \
+            --build-arg RHEL_VERSION=${{ matrix.RHEL_VERSION }} \
+            --build-arg PG_VERSION=${{ matrix.PG_VERSION }} \
+            --build-arg PG_FASTLOAD_VERSION=${{ needs.release.outputs.version }} \
+            --build-arg REPO_URL=${{ github.server_url }}/${{ github.repository }}.git \
+            --build-arg GIT_REF=${{ github.ref_name }}
+          container_id=$(docker create pg_fastload)
+          docker cp "$container_id":/var/lib/pgsql/rpmbuild/RPMS/x86_64 ./RPMS
+          docker rm "$container_id"
+          ls -l RPMS
+
+      - name: Attach the RPM to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" ./RPMS/*.rpm --clobber

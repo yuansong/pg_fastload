@@ -39,7 +39,8 @@ jobs:
             --build-arg RHEL_VERSION="$RHEL_VERSION" \
             --build-arg PG_VERSION="$PG_VERSION" \
             --build-arg PG_FASTLOAD_VERSION="$PG_FASTLOAD_VERSION" \
-            --build-arg REPO_URL=${{ github.server_url }}/${{ github.repository }}.git
+            --build-arg REPO_URL=${{ github.server_url }}/${{ github.repository }}.git \
+            --build-arg GIT_REF=${{ github.ref_name }}
           container_id=$(docker create pg_fastload)
           docker cp "$container_id":/var/lib/pgsql/rpmbuild/RPMS/x86_64 ./RPMS
 

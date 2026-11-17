@@ -86,6 +86,17 @@ Method and all caveats: [docs/BENCHMARK.md](https://github.com/yuansong/pg_fastl
 
 ## Install
 
+RPM packages are attached to this release for PostgreSQL 15 / 16 / 17 / 18 on RHEL 8 / 9 / 10,
+one per combination (`pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm`, for example). Each was built
+inside its target distribution from this tag and passed `make installcheck` against the installed
+package before upload, so a package that is here has been tested on the platform it names.
+
+```bash
+sudo dnf install ./pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm
+```
+
+From source:
+
 ```bash
 make USE_PGXS=1 PG_CONFIG=/path/to/pg_config
 sudo make USE_PGXS=1 PG_CONFIG=/path/to/pg_config install
@@ -105,6 +116,9 @@ as-is. The table and heap format are unchanged, so no data migration is involved
 ## Deliverables
 
 - Source: this tag (`git archive --format=zip v1.0.0`)
+- Source tarball: `pg_fastload-1.0.0.tar.gz` — the exact tree the RPMs were built from, next to
+  its `.sha256`
+- Binary packages: `pg_fastload-1.0.0-1.pg{15,16,17,18}.rhel{8,9,10}.x86_64.rpm`, 12 in total
 - Binary bundle: `pg_fastload_v1.0.0_deliverables.zip` — the source tree, a prebuilt release and
   debug `.so`, the acceptance tools and their evidence. Its digest is recorded in
   `fastload_deliverables_sha256.txt`, shipped alongside the archive and re-verified by the packer

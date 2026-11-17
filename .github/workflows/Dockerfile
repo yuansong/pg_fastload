@@ -1,3 +1,15 @@
+# Build container for the binary release assets.
+#
+# One image builds one (PostgreSQL major, RHEL major) pair.  It compiles the
+# extension and the CLI against the distribution's PostgreSQL, packs them with
+# rpmbuild, then installs the package it just produced and runs the regression
+# suite against that installation -- so a release never carries a package whose
+# own tests did not pass on the platform it was built for.
+#
+# The source is taken from GIT_REF (the release tag), not from the default
+# branch, and the tarball fed to rpmbuild is the same git archive that is
+# published next to the RPMs.
+
 ARG RHEL_VERSION
 FROM rockylinux/rockylinux:${RHEL_VERSION:-10}
 
@@ -5,6 +17,7 @@ ARG RHEL_VERSION
 ARG PG_VERSION
 ARG PG_FASTLOAD_VERSION
 ARG REPO_URL
+ARG GIT_REF=master
 
 ENV PATH=/usr/pgsql-${PG_VERSION}/bin:$PATH
 ENV PGDATA=/var/lib/pgsql/${PG_VERSION}/data
@@ -50,15 +63,16 @@ RUN dnf install -y \
 USER postgres
 WORKDIR /var/lib/pgsql/
 
-# Deploy the files required for the build
+# Deploy the files required by the build
 RUN rpmdev-setuptree
-RUN git clone ${REPO_URL}
-RUN cp -a pg_fastload/SPECS/pg_fastload-pg${PG_VERSION}.spec rpmbuild/SPECS
-RUN cd pg_fastload && \
-    git archive VERSION${PG_FASTLOAD_VERSION//./_} \
+RUN git clone --depth 1 --branch "${GIT_REF}" "${REPO_URL}" src
+RUN cp -a src/SPECS/pg_fastload-pg${PG_VERSION}.spec rpmbuild/SPECS/
+RUN cd src && \
+    git archive \
         --format=tar.gz \
         --prefix=pg_fastload-${PG_FASTLOAD_VERSION}/ \
-        --output=../rpmbuild/SOURCES/pg_fastload-${PG_FASTLOAD_VERSION}.tar.gz
+        --output=../rpmbuild/SOURCES/pg_fastload-${PG_FASTLOAD_VERSION}.tar.gz \
+        HEAD
 
 # Build RPMs
 RUN QA_RPATHS=0x0002 rpmbuild rpmbuild/SPECS/pg_fastload-pg${PG_VERSION}.spec \
@@ -67,14 +81,18 @@ RUN QA_RPATHS=0x0002 rpmbuild rpmbuild/SPECS/pg_fastload-pg${PG_VERSION}.spec \
 
 ################################################################################
 #
-# Run regression tests
+# Run regression tests against the package, not against the build tree
 #
 ################################################################################
 
 USER root
-RUN rpm -ivh /var/lib/pgsql/rpmbuild/RPMS/x86_64/*
+RUN rpm -ivh /var/lib/pgsql/rpmbuild/RPMS/x86_64/*.rpm
 
 USER postgres
-RUN initdb --no-locale -E UTF8  && \
-    pg_ctl -w start && \
-    make -C pg_fastload installcheck
+RUN mkdir -p /var/lib/pgsql/check && \
+    tar -xzf /var/lib/pgsql/rpmbuild/SOURCES/pg_fastload-${PG_FASTLOAD_VERSION}.tar.gz \
+        -C /var/lib/pgsql/check --strip-components=1 && \
+    cd /var/lib/pgsql/check && \
+    initdb --no-locale -E UTF8 && \
+    pg_ctl -w start -l /var/lib/pgsql/check/server.log && \
+    make USE_PGXS=1 installcheck

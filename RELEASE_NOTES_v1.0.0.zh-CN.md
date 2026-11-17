@@ -77,6 +77,16 @@ FIXED`、`OUT_COL`、`HEADER`、`LIMIT`、`DELIMITER` / `QUOTE` / `ESCAPE` / `NU
 
 ## 安装
 
+本版本为 PostgreSQL 15 / 16 / 17 / 18 × RHEL 8 / 9 / 10 各附了一个 RPM
+（例如 `pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm`）。每个包都在目标发行版内按本标签源码构建，
+并在上传前用装好的包跑过 `make installcheck`——因此能下载到的包，已经在它标注的平台上测过。
+
+```bash
+sudo dnf install ./pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm
+```
+
+从源码安装：
+
 ```bash
 make USE_PGXS=1 PG_CONFIG=/path/to/pg_config
 sudo make USE_PGXS=1 PG_CONFIG=/path/to/pg_config install
@@ -96,7 +106,9 @@ CREATE EXTENSION pg_fastload;
 ## 交付物
 
 - 源码：本标签（`git archive --format=zip v1.0.0`）
-- 二进制包：`pg_fastload_v1.0.0_deliverables.zip` —— 源码树、预编译 release 与 debug `.so`、
+- 源码包：`pg_fastload-1.0.0.tar.gz` —— RPM 就是从这个树构建的，旁边是其 `.sha256`
+- 二进制包：`pg_fastload-1.0.0-1.pg{15,16,17,18}.rhel{8,9,10}.x86_64.rpm`，共 12 个
+- 二进制包（打包合集）：`pg_fastload_v1.0.0_deliverables.zip` —— 源码树、预编译 release 与 debug `.so`、
   验收工具与其证据。摘要记录在同级 `fastload_deliverables_sha256.txt` 中，由打包脚本
   （`make_fastload_deliverables.py`）在每次构建时重新校验。
 

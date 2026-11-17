@@ -10,13 +10,14 @@
 
 Summary:        High speed data load utility for PostgreSQL
 Name:           %{sname}
-Version:        3.1.23
+Version:        1.0.0
 Release:        1%{?dist}
-License:        BSD
+License:        BSD-3-Clause
 Group:          Applications/Databases
-# You can get the tarball by following: https://github.com/ossc-db/pg_fastload/archive/%{version}.tar.gz
+# The release tarball is git archive output, published next to the RPMs:
+# https://github.com/yuansong/pg_fastload/releases/download/v%{version}/pg_fastload-%{version}.tar.gz
 Source0:        %{sname}-%{version}.tar.gz
-URL:            http://ossc-db.github.io/pg_fastload/index.html
+URL:            https://github.com/yuansong/pg_fastload
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-%(%{__id_u} -n)
 
 BuildRequires:  postgresql18-devel, postgresql18
@@ -35,7 +36,7 @@ Requires: pg_fastload = %{version}
 Summary:  Just-in-time compilation support for pg_fastload
 
 %description llvmjit
-Just-in-time compilation support for pg_bulkdload
+Just-in-time compilation support for pg_fastload
 
 %prep
 rm -rf %{_libdir}/pgxs/src/backend/
@@ -93,6 +94,7 @@ rm -rf %{buildroot}
 rm -rf %{_libdir}/pgxs/src/backend/
 
 %changelog
-* Tue Jan 13 2026 - NTT OSS Center <shinya11.kato@gmail.com> 3.1.23-1
-- Support PostgreSQL 18
-- Update to pg_fastload 3.1.23
+* Tue Nov 17 2026 - pg_fastload maintainers <yuansong@users.noreply.github.com> - 1.0.0-1
+- First public release of pg_fastload
+- Parallel loading with PARALLEL_WORKERS 1..64 and parallel export
+- Supports PostgreSQL 15, 16, 17 and 18

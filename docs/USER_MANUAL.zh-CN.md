@@ -82,6 +82,16 @@ CSV / BINARY / FIXED 文件，用的是同一套 Writer 与同一套 `COL`/`OUT_
 
 ### 2.2 构建与安装（PGXS）
 
+**二进制包。** 每个版本还为每组（PostgreSQL 主版本 × RHEL 主版本）发布一个 RPM，
+如 `pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm` 对应 RHEL 9 上的 PostgreSQL 18，
+15 / 16 / 17 / 18 × RHEL 8 / 9 / 10 都有。它们都在目标发行版内、按标签源码构建，
+并且每个包在上传前都会用装好的包跑一遍 `make installcheck`——也就是说，
+能下载到的 RPM 已经在自己的平台上通过了整套回归测试。如果你的服务器对得上，
+`sudo dnf install ./pg_fastload-1.0.0-1.pg18.rhel9.x86_64.rpm` 就是全部安装步骤，
+本节余下内容可以跳过。
+
+从源码安装：
+
 ```bash
 tar xzf pg_fastload-1.0.0.tar.gz
 cd pg_fastload
