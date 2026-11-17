@@ -1,5 +1,23 @@
 name: Test
 
+# Functional regression suite (pg_regress) on every supported major.
+#
+# PostgreSQL 14 and older are deliberately absent from the matrix:
+# include/pg_fastload.h rejects them with #error, so a 14 job can only ever
+# fail.  The supported range is 15 through 19; 19 is not in this matrix
+# because there is no Ubuntu package / stable tarball for it yet.
+#
+# Two properties this file relies on, both fixes for a silently red workflow:
+#
+#   * pipefail: `make ... 2>&1 | tee $LOGFILE` reports the status of tee, not
+#     of make.  Without pipefail a compile error is swallowed and only shows
+#     up later as a confusing "could not open extension control file" in
+#     installcheck.  Every step that pipes into tee therefore runs with
+#     `bash -xeo pipefail`.
+#   * fail-fast: false: with fail-fast enabled (the default) one bad major
+#     cancels the remaining jobs, so the majors that would have passed never
+#     report and the failure looks bigger than it is.
+
 on:
   push:
     branches:
@@ -11,28 +29,30 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        PGVERSION:                # TODO: build with master branch
+        PGVERSION:
           - "18.1"
           - "17.7"
           - "16.11"
           - "15.15"
-          - "14.20"
 
     env:
       CACHE_VERSION: 20251204  # to identify cache version
 
     steps:
+    - uses: actions/checkout@v4
+
     - name: cat version
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
          cat /etc/os-release
          uname -a
 
     - name: get current branch name
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         if [ ${{ github.event_name }} = "pull_request" ]; then
           echo "BRANCH=${{ github.base_ref }}" >>  $GITHUB_ENV
@@ -41,7 +61,7 @@ jobs:
         fi
 
     - name: set build postgresql version
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         echo "PGVERSION=${{ matrix.PGVERSION }}" >> $GITHUB_ENV
 
@@ -54,7 +74,7 @@ jobs:
 
     - name: build postgresql
       if: steps.cache-postgresql-core.outputs.cache-hit != 'true'
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         # set environment variables
         export PGHOME=~/pgsql/${{ env.PGVERSION }}
@@ -64,10 +84,6 @@ jobs:
         sudo apt-get -y install bc libpam-dev libedit-dev
         wget -q https://ftp.postgresql.org/pub/source/v${{ env.PGVERSION }}/postgresql-${{ env.PGVERSION }}.tar.gz
         tar xzf postgresql-${{ env.PGVERSION }}.tar.gz
-
-        # TODO: if test with master branch
-        # git clone --single-branch --branch ${{ env.PGVERSION }} \
-        #   https://github.com/postgres/postgres.git ${{ env.PGVERSION }}
 
         cd postgresql-${{ env.PGVERSION }}
         ./configure --prefix=$PGHOME --enable-cassert
@@ -79,13 +95,13 @@ jobs:
 
     - name: show build warning
       if: steps.cache-postgresql-core.outputs.cache-hit != 'true'
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
-        LOGFILE=~/make.log  # TODO: though I want to remove duplicated vars...
+        LOGFILE=~/make.log
         grep -C 1 warning $LOGFILE || exit 0     # ok if warning doesn't exists (= status code is 1)
 
     - name: create database directory
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         export PGHOME=~/pgsql/${{ env.PGVERSION }}
         export PGDATA=~/pgdata/${{ env.PGVERSION }}
@@ -105,7 +121,7 @@ jobs:
         pg_ctl -D $PGDATA start
 
     - name: show postgresql configuration
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         export PGHOME=~/pgsql/${{ env.PGVERSION }}
         export PGDATA=~/pgdata/${{ env.PGVERSION }}
@@ -113,10 +129,8 @@ jobs:
         pg_config --version
         cat $PGDATA/postgresql.conf
 
-    - uses: actions/checkout@v2
-
     - name: make install
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         export PGHOME=~/pgsql/${{ env.PGVERSION }}
         export PATH=$PGHOME/bin:$PATH:
@@ -124,21 +138,31 @@ jobs:
         make install 2>&1 | tee $LOGFILE
 
     - name: show build warning
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         LOGFILE=~/make.log
         grep -C 1 warning $LOGFILE || exit 0     # ok if warning doesn't exists (= status code is 1)
 
     - name: make installcheck
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
         export PGHOME=~/pgsql/${{ env.PGVERSION }}
         export PATH=$PGHOME/bin:$PATH:
         make installcheck
 
-    - name: show the result if the regression test failed
+    - name: publish the regression diff on failure
       if: failure()
-      shell: bash -xe {0}
+      shell: bash -xeo pipefail {0}
       run: |
-        cat bin/regression.diffs   \
-         && exit 1     # notify fail
+        # The job log is not readable without repository admin rights, so put
+        # the diff in the run summary as well; it is the only channel that
+        # stays visible to whoever opens the run page.
+        DIFF=bin/regression.diffs
+        {
+          echo "### regression diff (PostgreSQL ${{ env.PGVERSION }})"
+          echo '```'
+          if [ -f "$DIFF" ]; then sed -n '1,200p' "$DIFF"; else echo "(no $DIFF produced)"; fi
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [ -f "$DIFF" ]; then sed -n '1,200p' "$DIFF"; fi
+        exit 1
