@@ -928,6 +928,12 @@ next to the notes check.
   the regression suite runs in the extracted tarball instead of in the clone, so the tree under
   test is the tree inside the package.
 
+- The matrix also found a portability defect that the Ubuntu-only CI could not see: RHEL 8
+  ships GCC 8.5, which rejects `fl_consume_input()`'s `done:` label because the only statements
+  between it and the closing brace are inside `#ifdef ENABLE_FASTLOAD_PROFILE` -- `error: label
+  at end of compound statement`, allowed only from C23 on.  A null statement after the label
+  (`;`) keeps it off the closing brace, and the file now compiles with GCC 8 and GCC 14 alike.
+
 `RPM packages (manual)` stays for a single combination (`workflow_dispatch`), which is how a
 packaging change is tried without moving the tag.
 

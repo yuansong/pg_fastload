@@ -837,6 +837,12 @@ pinfo.relname = get_relation_name(wt->relid);
 - `.github/workflows/Dockerfile` 改为按 `GIT_REF`（标签）取源码而不是默认分支，回归测试也在
   解包出来的 tarball 里跑而不是在 clone 里跑，所以被测的树就是包里的树。
 
+- 矩阵还查出一个只在 Ubuntu 之外才暴露的可移植缺陷：RHEL 8 自带 GCC 8.5，它拒绝
+  `fl_consume_input()` 里的 `done:` 标签——该标签与右花括号之间只有
+  `#ifdef ENABLE_FASTLOAD_PROFILE` 里的语句，于是报 `error: label at end of compound statement`
+  （这一写法要到 C23 才合法）。在标签后补一个空语句（`;`）即可让它不再紧邻右花括号，
+  该文件现在 GCC 8 与 GCC 14 都能编译。
+
 `RPM packages (manual)` 保留，用于单独试某一组组合（`workflow_dispatch`），
 这样调打包时不必动标签。
 
