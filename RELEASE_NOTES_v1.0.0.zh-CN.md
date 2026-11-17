@@ -4,6 +4,11 @@
 
 发布日期：2026-11-09 · 首个公开版本 · BSD 3-Clause
 
+> **标签于 2026-11-17 重切。** 该标签同时包含首次 CI 全绿暴露出的两个缺陷：`WRITER = BINARY`
+> 写文件时会在第一行数据写出前让 backend 崩溃；`DUPLICATE_ERRORS` 会被误判为与 `SKIP_INDEX`
+> 同时使用而拒绝。`Test`（每个主版本 10 个用例，`--enable-cassert`）在 15.15 / 16.11 / 17.7 /
+> 18.1 上全绿。
+
 `pg_fastload` 保留 pg_bulkload 的单进程加载管道，并在其之上用 PostgreSQL 原生共享内存实现了
 一条并行通路：单个 reader 只扫一遍输入，N 个后台进程解析记录、成型元组，而所有插入仍由发起
 加载的 backend 完成 —— 并且发生在调用方的事务里。

@@ -4,6 +4,12 @@
 
 Released: 2026-11-09 · First public release · BSD 3-Clause
 
+> **Tag re-cut 2026-11-17.** The tag also carries the two defects that the first green CI run
+> surfaced: a `WRITER = BINARY` load that writes to a file crashed the backend before the first
+> row was written, and `DUPLICATE_ERRORS` was refused as though it had been combined with
+> `SKIP_INDEX`. `Test` (10 cases per major, `--enable-cassert`) is green on 15.15 / 16.11 /
+> 17.7 / 18.1.
+
 `pg_fastload` keeps pg_bulkload's single-process loading pipeline and adds a parallel path on
 top of native PostgreSQL shared memory: one reader scans the input once, N background workers
 parse records and form tuples, and the backend that issued the load still does every insert —
