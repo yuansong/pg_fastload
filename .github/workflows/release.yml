@@ -127,12 +127,25 @@ jobs:
 
       - name: Build the PostgreSQL ${{ matrix.PG_VERSION }} RPM for RHEL ${{ matrix.RHEL_VERSION }}
         run: |
-          docker build .github/workflows/ -t pg_fastload \
+          # --progress=plain keeps the RUN output line by line; a job log needs
+          # admin rights, so the summary below is where a failure has to be
+          # readable.
+          docker build .github/workflows/ -t pg_fastload --progress=plain \
             --build-arg RHEL_VERSION=${{ matrix.RHEL_VERSION }} \
             --build-arg PG_VERSION=${{ matrix.PG_VERSION }} \
             --build-arg PG_FASTLOAD_VERSION=${{ needs.release.outputs.version }} \
             --build-arg REPO_URL=${{ github.server_url }}/${{ github.repository }}.git \
-            --build-arg GIT_REF=${{ github.ref_name }}
+            --build-arg GIT_REF=${{ github.ref_name }} 2>&1 | tee /tmp/docker-build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            {
+              echo "### pg${{ matrix.PG_VERSION }} / rhel${{ matrix.RHEL_VERSION }}: docker build failed (rc=$rc)"
+              echo '```'
+              tail -n 120 /tmp/docker-build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
           container_id=$(docker create pg_fastload)
           docker cp "$container_id":/var/lib/pgsql/rpmbuild/RPMS/x86_64 ./RPMS
           docker rm "$container_id"
