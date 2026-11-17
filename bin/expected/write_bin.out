@@ -119,7 +119,7 @@ Parse error Record 4: Input Record 9: Rejected - column 6. value out of range: o
 Parse error Record 5: Input Record 10: Rejected - column 7. "-1E+309" is out of range for type double precision
 Parse error Record 6: Input Record 11: Rejected - column 4. value "-1" is out of range for type unsigned smallint
 Parse error Record 7: Input Record 12: Rejected - column 5. value "-1" is out of range for type unsigned integer
-Parse error Record 8: Input Record 13: Rejected - column 8. null value violates not-null constraint
+Parse error Record 8: Input Record 13: Rejected - column 8. column 8 is NULL and OUT_COL gives it no representation
 Parse error Record 9: Input Record 15: Rejected - column 1. value "32768" is out of range for type smallint
 Parse error Record 10: Input Record 16: Rejected - column 2. value "2147483648" is out of range for type integer
 Parse error Record 11: Input Record 17: Rejected - column 3. value "9223372036854775808" is out of range for type bigint
