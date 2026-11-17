@@ -32,13 +32,16 @@ jobs:
         shell: bash -xe {0}
         run: |
           # apt-key was removed in Ubuntu 24.04; the key is now pinned per
-          # repository with signed-by.
+          # repository with signed-by.  Both downloads retry: a single curl
+          # hiccup while fetching the key already failed one matrix entry with
+          # curl's exit code 55.
           sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+          sudo curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
             https://www.postgresql.org/media/keys/ACCC4CF8.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
+          sudo apt-get -o Acquire::Retries=3 update
           # libselinux-dev does not exist on noble; the package is libselinux1-dev.
           sudo apt-get -y install \
             build-essential \
