@@ -26,8 +26,12 @@ permissions:
   contents: write
 
 concurrency:
+  # A re-pushed tag replaces the previous attempt, assets included (every
+  # upload uses --clobber).  Not cancelling would leave an older attempt
+  # holding the group, and a run that hangs for its whole timeout blocks the
+  # newer one behind it -- which is exactly what happened on the first day.
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   release:
@@ -114,6 +118,9 @@ jobs:
   rpms:
     needs: release
     runs-on: ubuntu-latest
+    # A docker build that hangs on a mirror should fail, not sit in the queue
+    # for the six hours the default timeout allows.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       # pg_bulkload ships rhel8/9/10 for every supported major.  PostgreSQL 14

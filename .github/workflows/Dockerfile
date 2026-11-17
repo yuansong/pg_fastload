@@ -92,7 +92,12 @@ USER root
 RUN rpm -ivh /var/lib/pgsql/rpmbuild/RPMS/x86_64/*.rpm
 
 USER postgres
-RUN mkdir -p /var/lib/pgsql/check && \
+# A build container gets a 64 MiB /dev/shm, which is where PostgreSQL puts both
+# its main shared memory and the dynamic segments the parallel path allocates.
+# The suite passes on a normal host but trips here under load, so give this
+# step a tmpfs of its own; the server settings stay at their defaults.
+RUN --mount=type=tmpfs,target=/dev/shm \
+    mkdir -p /var/lib/pgsql/check && \
     tar -xzf /var/lib/pgsql/rpmbuild/SOURCES/pg_fastload-${PG_FASTLOAD_VERSION}.tar.gz \
         -C /var/lib/pgsql/check --strip-components=1 && \
     cd /var/lib/pgsql/check && \
